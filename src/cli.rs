@@ -143,8 +143,8 @@ struct TimelineArgs {
 
 #[derive(Debug, Args)]
 struct UnusedArgs {
-    #[arg(long, default_value = "skills.toml")]
-    defined_skills: PathBuf,
+    #[arg(long)]
+    defined_skills: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, ValueEnum)]
@@ -418,21 +418,28 @@ fn failures_command(args: FilterArgs) -> Result<()> {
 
 fn unused_command(args: UnusedArgs) -> Result<()> {
     let paths = StoragePaths::discover()?;
+    let config = AppConfig::load_or_create(&paths)?;
     let database = Database::open(&paths.database_path())?.initialize()?;
     let observed = database.observed_skills()?;
-    let report =
-        stats::UnusedSkillsReport::from_declared_and_observed(&args.defined_skills, &observed)?;
+    let report = stats::UnusedSkillsReport::from_declared_and_observed(
+        &resolve_defined_skills_path(args.defined_skills.as_deref(), &config)?,
+        &observed,
+    )?;
     println!("{}", report.render());
     Ok(())
 }
 
 fn recommend_command() -> Result<()> {
     let paths = StoragePaths::discover()?;
+    let config = AppConfig::load_or_create(&paths)?;
     let database = Database::open(&paths.database_path())?.initialize()?;
     let observed = database.observed_skills()?;
     let stats_rows = database.skill_stats(None, None, None)?;
-    let recommendations =
-        recommend::build_recommendations(&stats_rows, &PathBuf::from("skills.toml"), &observed)?;
+    let recommendations = recommend::build_recommendations(
+        &stats_rows,
+        &resolve_defined_skills_path(None, &config)?,
+        &observed,
+    )?;
 
     println!("Recommendations:");
     for (index, line) in recommendations.iter().enumerate() {
@@ -494,6 +501,17 @@ fn infer_wrapper_identity(command: &[String]) -> (String, String) {
     } else {
         (executable, "process-wrapper".to_string())
     }
+}
+
+fn resolve_defined_skills_path(
+    override_path: Option<&std::path::Path>,
+    config: &AppConfig,
+) -> Result<PathBuf> {
+    let cwd = env::current_dir().context("failed to determine current directory")?;
+    Ok(match override_path {
+        Some(path) => crate::config::resolve_path(&cwd, path),
+        None => config.resolved_definition_file(&cwd),
+    })
 }
 
 fn wrap_input_summary(command: &[String], capture_raw_prompts: bool) -> Option<String> {

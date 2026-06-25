@@ -126,6 +126,10 @@ impl AppConfig {
         Self::write_default_if_missing(paths)?;
         Self::load(paths)
     }
+
+    pub fn resolved_definition_file(&self, cwd: &Path) -> PathBuf {
+        resolve_path(cwd, Path::new(&self.skills.definition_file))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -187,4 +191,49 @@ fn write_if_missing(path: &Path, contents: &str) -> Result<()> {
     }
 
     fs::write(path, contents).with_context(|| format!("failed to write {}", path.display()))
+}
+
+pub fn resolve_path(base_dir: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() { path.to_path_buf() } else { base_dir.join(path) }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::{AppConfig, resolve_path};
+
+    #[test]
+    fn configured_definition_file_resolves_from_working_directory() {
+        let config = AppConfig {
+            storage: super::StorageConfig {
+                backend: "sqlite".to_string(),
+                path: "~/.skilltrace/skilltrace.db".to_string(),
+                jsonl_mirror: true,
+            },
+            agents: super::AgentsConfig {
+                codex: super::AgentConfig { enabled: true, adapter: "wrapper".to_string() },
+            },
+            mcp: super::McpConfig { enabled: true, transport: "stdio".to_string() },
+            privacy: super::PrivacyConfig {
+                capture_raw_prompts: false,
+                capture_raw_outputs: false,
+                hash_sensitive_values: true,
+            },
+            skills: super::SkillsConfig { definition_file: "config/skills.toml".to_string() },
+        };
+
+        assert_eq!(
+            config.resolved_definition_file(Path::new("/repo")),
+            Path::new("/repo/config/skills.toml")
+        );
+    }
+
+    #[test]
+    fn explicit_relative_paths_resolve_from_base_directory() {
+        assert_eq!(
+            resolve_path(Path::new("/repo"), Path::new("nested/skills.toml")),
+            Path::new("/repo/nested/skills.toml")
+        );
+    }
 }
