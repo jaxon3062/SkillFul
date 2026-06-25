@@ -1,0 +1,20 @@
+[[skill]]
+name = "repo_search"
+description = "Search local repository files"
+category = "retrieval"
+
+[[skill]]
+name = "file_edit"
+description = "Modify source files"
+category = "coding"
+
+[[skill]]
+name = "run_tests"
+description = "Run project tests"
+category = "validation"
+
+[[skill]]
+name = "debug_error"
+description = "Investigate and fix runtime or test failures"
+category = "debugging"
+
