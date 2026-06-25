@@ -1,4 +1,4 @@
-use std::{env, fs::OpenOptions, io::Write, path::PathBuf};
+use std::{env, fs::OpenOptions, io::Write, path::PathBuf, process::Command};
 
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -165,9 +165,112 @@ fn init_command() -> Result<()> {
 
 fn wrap_command(args: WrapArgs) -> Result<()> {
     let command_line = args.command.join(" ");
-    let adapters = crate::adapters::supported_adapters().join(", ");
-    println!("Wrapper scaffold ready for: {command_line}\nSupported adapters: {adapters}");
-    Ok(())
+    let _supported_adapters = crate::adapters::supported_adapters();
+    let paths = StoragePaths::discover()?;
+    paths.ensure_dirs()?;
+    AppConfig::write_default_if_missing(&paths)?;
+    let database = Database::open(&paths.database_path())?.initialize()?;
+
+    let (agent, adapter) = infer_wrapper_identity(&args.command);
+    let session = SessionRecord::new(agent.clone(), adapter.clone(), current_working_directory());
+    database.upsert_session(&session)?;
+    RuntimeState { current_session_id: Some(session.id.clone()) }.save(&paths)?;
+
+    record_event(
+        &database,
+        &paths,
+        EventRecord::new(
+            "session_start".to_string(),
+            session.id.clone(),
+            None,
+            None,
+            agent.clone(),
+            adapter.clone(),
+            None,
+            None,
+            None,
+            0,
+            Some(command_line.clone()),
+            Some("wrapper launched child process".to_string()),
+            None,
+            None,
+            Vec::new(),
+            None,
+            None,
+            None,
+        ),
+    )?;
+
+    let status = Command::new(&args.command[0]).args(&args.command[1..]).status();
+
+    match status {
+        Ok(status) => {
+            let success = status.success();
+            let output_summary = match status.code() {
+                Some(code) => format!("child exited with status code {code}"),
+                None => "child terminated by signal".to_string(),
+            };
+            let error = if success { None } else { Some(output_summary.clone()) };
+
+            record_event(
+                &database,
+                &paths,
+                EventRecord::new(
+                    "session_end".to_string(),
+                    session.id.clone(),
+                    None,
+                    None,
+                    agent,
+                    adapter,
+                    Some(success),
+                    None,
+                    error,
+                    0,
+                    None,
+                    Some(output_summary),
+                    None,
+                    None,
+                    Vec::new(),
+                    None,
+                    None,
+                    None,
+                ),
+            )?;
+            database.mark_session_ended(&session.id, &Utc::now().to_rfc3339())?;
+            RuntimeState { current_session_id: None }.save(&paths)?;
+
+            if success { Ok(()) } else { anyhow::bail!("wrapped command failed") }
+        }
+        Err(error) => {
+            record_event(
+                &database,
+                &paths,
+                EventRecord::new(
+                    "error".to_string(),
+                    session.id.clone(),
+                    None,
+                    None,
+                    agent.clone(),
+                    adapter.clone(),
+                    Some(false),
+                    None,
+                    Some(error.to_string()),
+                    0,
+                    Some(command_line),
+                    Some("failed to spawn child process".to_string()),
+                    None,
+                    None,
+                    Vec::new(),
+                    None,
+                    None,
+                    None,
+                ),
+            )?;
+            database.mark_session_ended(&session.id, &Utc::now().to_rfc3339())?;
+            RuntimeState { current_session_id: None }.save(&paths)?;
+            Err(error).context("failed to execute wrapped command")
+        }
+    }
 }
 
 fn event_command(args: EventArgs) -> Result<()> {
@@ -237,8 +340,7 @@ fn event_command(args: EventArgs) -> Result<()> {
         args.tokens_output,
         args.cost_usd,
     );
-    database.insert_event(&record)?;
-    append_jsonl(&paths, &record)?;
+    record_event(&database, &paths, record.clone())?;
 
     if matches!(args.kind, EventKind::SessionEnd) {
         database.mark_session_ended(&session_id, &Utc::now().to_rfc3339())?;
@@ -341,4 +443,27 @@ fn append_jsonl(paths: &StoragePaths, event: &EventRecord) -> Result<()> {
         .open(paths.jsonl_path())
         .with_context(|| format!("failed to open {}", paths.jsonl_path().display()))?;
     writeln!(file, "{}", serde_json::to_string(event)?).context("failed to append JSONL event")
+}
+
+fn record_event(database: &Database, paths: &StoragePaths, event: EventRecord) -> Result<()> {
+    database.insert_event(&event)?;
+    append_jsonl(paths, &event)
+}
+
+fn infer_wrapper_identity(command: &[String]) -> (String, String) {
+    let executable = command
+        .first()
+        .map(|value| {
+            PathBuf::from(value)
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_else(|| value.clone())
+        })
+        .unwrap_or_else(|| "wrapped-command".to_string());
+
+    if executable == "codex" {
+        ("codex".to_string(), crate::adapters::codex::ADAPTER_NAME.to_string())
+    } else {
+        (executable, "process-wrapper".to_string())
+    }
 }
