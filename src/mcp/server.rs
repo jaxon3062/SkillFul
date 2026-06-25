@@ -80,6 +80,12 @@ fn handle_tool_call(call: ToolCallParams) -> Result<Value> {
     match call.name.as_str() {
         "skilltrace.record_event" => {
             let args: RecordEventArgs = serde_json::from_value(call.arguments)?;
+            ensure_session(
+                &database,
+                &args.session_id,
+                args.agent.as_deref().unwrap_or("codex"),
+                args.adapter.as_deref().unwrap_or("mcp"),
+            )?;
             let event = EventRecord::new(
                 args.event_type,
                 args.session_id,
@@ -105,13 +111,17 @@ fn handle_tool_call(call: ToolCallParams) -> Result<Value> {
         }
         "skilltrace.record_skill_start" => {
             let args: RecordSkillStartArgs = serde_json::from_value(call.arguments)?;
+            let session_id = args.session_id.unwrap_or_else(new_session_id);
+            let agent = args.agent.unwrap_or_else(|| "codex".to_string());
+            let adapter = args.adapter.unwrap_or_else(|| "mcp".to_string());
+            ensure_session(&database, &session_id, &agent, &adapter)?;
             let event = EventRecord::new(
                 "skill_start".to_string(),
-                args.session_id.unwrap_or_else(new_session_id),
+                session_id,
                 args.task_id,
                 Some(args.skill),
-                args.agent.unwrap_or_else(|| "codex".to_string()),
-                args.adapter.unwrap_or_else(|| "mcp".to_string()),
+                agent,
+                adapter,
                 None,
                 None,
                 None,
@@ -138,6 +148,7 @@ fn handle_tool_call(call: ToolCallParams) -> Result<Value> {
                 args.output_summary.as_deref(),
                 args.error.as_deref(),
             )?;
+            append_jsonl_snapshot(&paths, &updated)?;
             Ok(json!({
                 "status": "recorded",
                 "event_id": updated.id,
@@ -146,6 +157,12 @@ fn handle_tool_call(call: ToolCallParams) -> Result<Value> {
         }
         "skilltrace.record_decision" => {
             let args: RecordDecisionArgs = serde_json::from_value(call.arguments)?;
+            ensure_session(
+                &database,
+                &args.session_id,
+                args.agent.as_deref().unwrap_or("codex"),
+                args.adapter.as_deref().unwrap_or("mcp"),
+            )?;
             let event = EventRecord::new(
                 "decision".to_string(),
                 args.session_id,
@@ -205,12 +222,27 @@ fn handle_tool_call(call: ToolCallParams) -> Result<Value> {
 
 fn persist_event(paths: &StoragePaths, database: &Database, event: &EventRecord) -> Result<()> {
     database.insert_event(event)?;
+    append_jsonl_snapshot(paths, event)
+}
+
+fn append_jsonl_snapshot(paths: &StoragePaths, event: &EventRecord) -> Result<()> {
     let mut file = std::fs::OpenOptions::new()
         .append(true)
         .create(true)
         .open(paths.jsonl_path())
         .with_context(|| format!("failed to open {}", paths.jsonl_path().display()))?;
     writeln!(file, "{}", serde_json::to_string(event)?).context("failed to append JSONL event")
+}
+
+fn ensure_session(database: &Database, session_id: &str, agent: &str, adapter: &str) -> Result<()> {
+    if database.get_session(session_id)?.is_none() {
+        let mut session =
+            crate::config::SessionRecord::new(agent.to_string(), adapter.to_string(), None);
+        session.id = session_id.to_string();
+        database.upsert_session(&session)?;
+    }
+
+    Ok(())
 }
 
 fn initialize_result() -> Value {
@@ -351,6 +383,8 @@ mod tests {
     use serde_json::json;
     use tempfile::tempdir;
 
+    use crate::{config::StoragePaths, db::Database};
+
     use super::{McpRequest, handle_request};
 
     fn with_temp_home<T>(test: T)
@@ -461,6 +495,18 @@ mod tests {
             .expect("record_skill_end");
 
             assert_eq!(end.result.expect("result")["status"], "recorded");
+
+            let paths = StoragePaths::discover().expect("paths");
+            let database = Database::open(&paths.database_path())
+                .expect("open db")
+                .initialize()
+                .expect("init db");
+            assert!(database.get_session("session-2").expect("get session").is_some());
+
+            let jsonl = fs::read_to_string(paths.jsonl_path()).expect("read jsonl");
+            assert_eq!(jsonl.lines().count(), 2);
+            assert!(jsonl.contains("\"event_type\":\"skill_start\""));
+            assert!(jsonl.contains("\"event_type\":\"skill_end\""));
         });
     }
 
@@ -498,6 +544,34 @@ mod tests {
             let result = response.result.expect("result");
             let recommendations = result["recommendations"].as_array().expect("array");
             assert!(!recommendations.is_empty());
+        });
+    }
+
+    #[test]
+    fn record_event_creates_missing_session() {
+        with_temp_home(|| {
+            handle_request(McpRequest {
+                jsonrpc: "2.0".to_string(),
+                id: json!(1),
+                method: "tools/call".to_string(),
+                params: Some(json!({
+                    "name": "skilltrace.record_event",
+                    "arguments": {
+                        "event_type": "decision",
+                        "session_id": "session-3",
+                        "agent": "codex",
+                        "adapter": "mcp"
+                    }
+                })),
+            })
+            .expect("record_event");
+
+            let paths = StoragePaths::discover().expect("paths");
+            let database = Database::open(&paths.database_path())
+                .expect("open db")
+                .initialize()
+                .expect("init db");
+            assert!(database.get_session("session-3").expect("get session").is_some());
         });
     }
 }
