@@ -4,7 +4,9 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 const DEFAULT_CONFIG: &str = r#"[storage]
 backend = "sqlite"
@@ -54,6 +56,10 @@ impl StoragePaths {
 
     pub fn jsonl_path(&self) -> PathBuf {
         self.root.join("events.jsonl")
+    }
+
+    pub fn state_path(&self) -> PathBuf {
+        self.root.join("state.toml")
     }
 }
 
@@ -107,6 +113,59 @@ impl AppConfig {
         write_if_missing(&paths.config_path(), DEFAULT_CONFIG)?;
         write_if_missing(&paths.jsonl_path(), "")?;
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeState {
+    pub current_session_id: Option<String>,
+}
+
+impl RuntimeState {
+    pub fn load(paths: &StoragePaths) -> Result<Self> {
+        let path = paths.state_path();
+        if !path.exists() {
+            return Ok(Self { current_session_id: None });
+        }
+
+        let contents = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        toml::from_str(&contents).with_context(|| format!("failed to parse {}", path.display()))
+    }
+
+    pub fn save(&self, paths: &StoragePaths) -> Result<()> {
+        let contents = toml::to_string(self).context("failed to serialize runtime state")?;
+        fs::write(paths.state_path(), contents)
+            .with_context(|| format!("failed to write {}", paths.state_path().display()))
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionRecord {
+    pub id: String,
+    pub agent: String,
+    pub adapter: String,
+    pub started_at: String,
+    pub ended_at: Option<String>,
+    pub cwd: Option<String>,
+    pub repo: Option<String>,
+    pub branch: Option<String>,
+    pub metadata_json: Option<String>,
+}
+
+impl SessionRecord {
+    pub fn new(agent: String, adapter: String, cwd: Option<String>) -> Self {
+        Self {
+            id: Uuid::new_v4().to_string(),
+            agent,
+            adapter,
+            started_at: Utc::now().to_rfc3339(),
+            ended_at: None,
+            cwd: cwd.clone(),
+            repo: cwd,
+            branch: None,
+            metadata_json: None,
+        }
     }
 }
 
