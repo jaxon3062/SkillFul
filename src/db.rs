@@ -1,7 +1,8 @@
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use rusqlite::{Connection, OptionalExtension, params};
+use serde::Serialize;
 
 use crate::{config::SessionRecord, event::EventRecord};
 
@@ -163,6 +164,40 @@ impl Database {
             ],
         ).context("failed to insert event")?;
         Ok(())
+    }
+
+    pub fn update_event_from_skill_end(
+        &self,
+        event_id: &str,
+        timestamp: &str,
+        success: bool,
+        output_summary: Option<&str>,
+        error: Option<&str>,
+    ) -> Result<EventRecord> {
+        let existing =
+            self.event_by_id(event_id)?.ok_or_else(|| anyhow!("event {event_id} not found"))?;
+        let duration_ms =
+            chrono::DateTime::parse_from_rfc3339(&existing.timestamp).ok().and_then(|started_at| {
+                chrono::DateTime::parse_from_rfc3339(timestamp)
+                    .ok()
+                    .map(|ended_at| (ended_at - started_at).num_milliseconds())
+            });
+
+        self.connection
+            .execute(
+                "UPDATE events
+                 SET event_type = 'skill_end',
+                     timestamp = ?2,
+                     duration_ms = ?3,
+                     success = ?4,
+                     error = ?5,
+                     output_summary = COALESCE(?6, output_summary)
+                 WHERE id = ?1",
+                params![event_id, timestamp, duration_ms, success, error, output_summary],
+            )
+            .with_context(|| format!("failed to update event {event_id}"))?;
+
+        self.event_by_id(event_id)?.ok_or_else(|| anyhow!("event {event_id} missing after update"))
     }
 
     pub fn skill_stats(
@@ -341,6 +376,49 @@ impl Database {
         rows.collect::<rusqlite::Result<Vec<_>>>().context("failed to decode event rows")
     }
 
+    pub fn event_by_id(&self, event_id: &str) -> Result<Option<EventRecord>> {
+        self.connection
+            .query_row(
+                "SELECT
+                   id, session_id, task_id, event_type, skill, agent, adapter, timestamp, duration_ms,
+                   success, error, retry_count, input_summary, output_summary, planner_reason,
+                   confidence, alternatives_json, tokens_input, tokens_output, cost_usd, metadata_json
+                 FROM events
+                 WHERE id = ?1",
+                params![event_id],
+                |row| {
+                    let alternatives_json: String = row.get(16)?;
+                    let alternatives = serde_json::from_str(&alternatives_json).unwrap_or_default();
+
+                    Ok(EventRecord {
+                        id: row.get(0)?,
+                        session_id: row.get(1)?,
+                        task_id: row.get(2)?,
+                        event_type: row.get(3)?,
+                        skill: row.get(4)?,
+                        agent: row.get(5)?,
+                        adapter: row.get(6)?,
+                        timestamp: row.get(7)?,
+                        duration_ms: row.get(8)?,
+                        success: row.get(9)?,
+                        error: row.get(10)?,
+                        retry_count: row.get(11)?,
+                        input_summary: row.get(12)?,
+                        output_summary: row.get(13)?,
+                        planner_reason: row.get(14)?,
+                        confidence: row.get(15)?,
+                        alternatives,
+                        tokens_input: row.get(17)?,
+                        tokens_output: row.get(18)?,
+                        cost_usd: row.get(19)?,
+                        metadata_json: row.get(20)?,
+                    })
+                },
+            )
+            .optional()
+            .context("failed to load event by id")
+    }
+
     fn last_session_id(&self) -> Result<Option<String>> {
         self.connection
             .query_row("SELECT id FROM sessions ORDER BY started_at DESC LIMIT 1", [], |row| {
@@ -351,7 +429,7 @@ impl Database {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct SkillStatsRow {
     pub skill: String,
     pub uses: i64,
@@ -361,7 +439,7 @@ pub struct SkillStatsRow {
     pub failures: i64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct TimelineRow {
     pub timestamp: String,
     pub event_type: String,
@@ -370,7 +448,7 @@ pub struct TimelineRow {
     pub session_id: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct FailureRow {
     pub timestamp: String,
     pub session_id: String,

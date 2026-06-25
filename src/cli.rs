@@ -460,11 +460,7 @@ fn export_command(args: ExportArgs) -> Result<()> {
 }
 
 fn mcp_command() -> Result<()> {
-    println!("{}", mcp::server::startup_banner());
-    for tool in mcp::tools::TOOLS {
-        println!("- {tool}");
-    }
-    Ok(())
+    mcp::server::run_stdio()
 }
 
 fn current_working_directory() -> Option<String> {
