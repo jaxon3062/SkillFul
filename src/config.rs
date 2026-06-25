@@ -114,6 +114,18 @@ impl AppConfig {
         write_if_missing(&paths.jsonl_path(), "")?;
         Ok(())
     }
+
+    pub fn load(paths: &StoragePaths) -> Result<Self> {
+        let contents = fs::read_to_string(paths.config_path())
+            .with_context(|| format!("failed to read {}", paths.config_path().display()))?;
+        toml::from_str(&contents)
+            .with_context(|| format!("failed to parse {}", paths.config_path().display()))
+    }
+
+    pub fn load_or_create(paths: &StoragePaths) -> Result<Self> {
+        Self::write_default_if_missing(paths)?;
+        Self::load(paths)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

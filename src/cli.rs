@@ -1,4 +1,10 @@
-use std::{env, fs::OpenOptions, io::Write, path::PathBuf, process::Command};
+use std::{
+    env,
+    fs::OpenOptions,
+    io::Write,
+    path::PathBuf,
+    process::{Command, ExitStatus},
+};
 
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -164,11 +170,10 @@ fn init_command() -> Result<()> {
 }
 
 fn wrap_command(args: WrapArgs) -> Result<()> {
-    let command_line = args.command.join(" ");
     let _supported_adapters = crate::adapters::supported_adapters();
     let paths = StoragePaths::discover()?;
     paths.ensure_dirs()?;
-    AppConfig::write_default_if_missing(&paths)?;
+    let config = AppConfig::load_or_create(&paths)?;
     let database = Database::open(&paths.database_path())?.initialize()?;
 
     let (agent, adapter) = infer_wrapper_identity(&args.command);
@@ -190,7 +195,7 @@ fn wrap_command(args: WrapArgs) -> Result<()> {
             None,
             None,
             0,
-            Some(command_line.clone()),
+            wrap_input_summary(&args.command, config.privacy.capture_raw_prompts),
             Some("wrapper launched child process".to_string()),
             None,
             None,
@@ -239,7 +244,7 @@ fn wrap_command(args: WrapArgs) -> Result<()> {
             database.mark_session_ended(&session.id, &Utc::now().to_rfc3339())?;
             RuntimeState { current_session_id: None }.save(&paths)?;
 
-            if success { Ok(()) } else { anyhow::bail!("wrapped command failed") }
+            if success { Ok(()) } else { Err(WrappedCommandExit::from_status(status).into()) }
         }
         Err(error) => {
             record_event(
@@ -256,7 +261,7 @@ fn wrap_command(args: WrapArgs) -> Result<()> {
                     None,
                     Some(error.to_string()),
                     0,
-                    Some(command_line),
+                    wrap_input_summary(&args.command, config.privacy.capture_raw_prompts),
                     Some("failed to spawn child process".to_string()),
                     None,
                     None,
@@ -272,6 +277,29 @@ fn wrap_command(args: WrapArgs) -> Result<()> {
         }
     }
 }
+
+#[derive(Debug)]
+pub struct WrappedCommandExit {
+    code: i32,
+}
+
+impl WrappedCommandExit {
+    pub fn from_status(status: ExitStatus) -> Self {
+        Self { code: exit_code_from_status(status) }
+    }
+
+    pub fn code(&self) -> i32 {
+        self.code
+    }
+}
+
+impl std::fmt::Display for WrappedCommandExit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "wrapped command exited with status {}", self.code)
+    }
+}
+
+impl std::error::Error for WrappedCommandExit {}
 
 fn event_command(args: EventArgs) -> Result<()> {
     let paths = StoragePaths::discover()?;
@@ -466,4 +494,25 @@ fn infer_wrapper_identity(command: &[String]) -> (String, String) {
     } else {
         (executable, "process-wrapper".to_string())
     }
+}
+
+fn wrap_input_summary(command: &[String], capture_raw_prompts: bool) -> Option<String> {
+    if capture_raw_prompts {
+        return Some(command.join(" "));
+    }
+
+    let executable = command.first().map(String::as_str).unwrap_or("wrapped-command");
+    Some(format!("wrapped command: {}", PathBuf::from(executable).display()))
+}
+
+#[cfg(unix)]
+fn exit_code_from_status(status: ExitStatus) -> i32 {
+    use std::os::unix::process::ExitStatusExt;
+
+    status.code().unwrap_or_else(|| status.signal().map(|signal| 128 + signal).unwrap_or(1))
+}
+
+#[cfg(not(unix))]
+fn exit_code_from_status(status: ExitStatus) -> i32 {
+    status.code().unwrap_or(1)
 }
