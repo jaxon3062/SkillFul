@@ -127,6 +127,10 @@ pub struct UnusedSkillsReport {
 }
 
 impl UnusedSkillsReport {
+    pub fn names(&self) -> &[String] {
+        &self.names
+    }
+
     pub fn render(&self) -> String {
         if self.names.is_empty() {
             return "No unused skills found.".to_string();

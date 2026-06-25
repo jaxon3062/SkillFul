@@ -297,17 +297,28 @@ fn unused_command(args: UnusedArgs) -> Result<()> {
 }
 
 fn recommend_command() -> Result<()> {
-    for line in recommend::default_recommendations() {
-        println!("{line}");
+    let paths = StoragePaths::discover()?;
+    let database = Database::open(&paths.database_path())?.initialize()?;
+    let observed = database.observed_skills()?;
+    let stats_rows = database.skill_stats(None, None, None)?;
+    let recommendations =
+        recommend::build_recommendations(&stats_rows, &PathBuf::from("skills.toml"), &observed)?;
+
+    println!("Recommendations:");
+    for (index, line) in recommendations.iter().enumerate() {
+        println!("{}. {line}", index + 1);
     }
     Ok(())
 }
 
 fn export_command(args: ExportArgs) -> Result<()> {
+    let paths = StoragePaths::discover()?;
+    let database = Database::open(&paths.database_path())?.initialize()?;
+
     match args.kind {
-        ExportKind::Jsonl => println!("{}", export::jsonl::export_stub()),
+        ExportKind::Jsonl => println!("{}", export::jsonl::export_events(&database)?),
         ExportKind::Otel => println!("{}", export::otel::export_stub()),
-    }
+    };
     Ok(())
 }
 

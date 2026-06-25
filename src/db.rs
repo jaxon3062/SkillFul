@@ -290,6 +290,53 @@ impl Database {
         rows.collect::<rusqlite::Result<Vec<_>>>().context("failed to decode observed skills")
     }
 
+    pub fn all_events(&self) -> Result<Vec<EventRecord>> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT
+                   id, session_id, task_id, event_type, skill, agent, adapter, timestamp, duration_ms,
+                   success, error, retry_count, input_summary, output_summary, planner_reason,
+                   confidence, alternatives_json, tokens_input, tokens_output, cost_usd, metadata_json
+                 FROM events
+                 ORDER BY timestamp ASC, id ASC",
+            )
+            .context("failed to prepare event export query")?;
+
+        let rows = statement
+            .query_map([], |row| {
+                let alternatives_json: String = row.get(16)?;
+                let alternatives = serde_json::from_str(&alternatives_json).unwrap_or_default();
+
+                Ok(EventRecord {
+                    id: row.get(0)?,
+                    session_id: row.get(1)?,
+                    task_id: row.get(2)?,
+                    event_type: row.get(3)?,
+                    skill: row.get(4)?,
+                    agent: row.get(5)?,
+                    adapter: row.get(6)?,
+                    timestamp: row.get(7)?,
+                    duration_ms: row.get(8)?,
+                    success: row.get(9)?,
+                    error: row.get(10)?,
+                    retry_count: row.get(11)?,
+                    input_summary: row.get(12)?,
+                    output_summary: row.get(13)?,
+                    planner_reason: row.get(14)?,
+                    confidence: row.get(15)?,
+                    alternatives,
+                    tokens_input: row.get(17)?,
+                    tokens_output: row.get(18)?,
+                    cost_usd: row.get(19)?,
+                    metadata_json: row.get(20)?,
+                })
+            })
+            .context("failed to run event export query")?;
+
+        rows.collect::<rusqlite::Result<Vec<_>>>().context("failed to decode event rows")
+    }
+
     fn last_session_id(&self) -> Result<Option<String>> {
         self.connection
             .query_row("SELECT id FROM sessions ORDER BY started_at DESC LIMIT 1", [], |row| {
