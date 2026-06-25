@@ -46,3 +46,39 @@ fn mcp_stdio_handles_initialize_and_tools_list() {
     let status = child.wait().expect("wait child");
     assert!(status.success());
 }
+
+#[test]
+fn mcp_stdio_returns_parse_error_and_keeps_running() {
+    let home = temp_home();
+    let binary = env!("CARGO_BIN_EXE_skilltrace");
+    let mut child = Command::new(binary)
+        .arg("mcp")
+        .env("HOME", home.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn skilltrace mcp");
+
+    {
+        let mut stdin = child.stdin.take().expect("stdin");
+        writeln!(stdin, "not-json").expect("write invalid");
+        writeln!(stdin, r#"{{"jsonrpc":"2.0","id":3,"method":"initialize"}}"#)
+            .expect("write initialize");
+    }
+
+    let stdout = child.stdout.take().expect("stdout");
+    let mut reader = BufReader::new(stdout);
+    let mut line = String::new();
+
+    reader.read_line(&mut line).expect("read parse error");
+    let parse_error: Value = serde_json::from_str(&line).expect("parse error response");
+    assert_eq!(parse_error["error"]["code"], -32700);
+
+    line.clear();
+    reader.read_line(&mut line).expect("read initialize response");
+    let initialize: Value = serde_json::from_str(&line).expect("parse initialize");
+    assert_eq!(initialize["result"]["serverInfo"]["name"], "skilltrace");
+
+    let status = child.wait().expect("wait child");
+    assert!(status.success());
+}

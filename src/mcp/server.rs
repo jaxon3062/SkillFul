@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::{
-    config::{AppConfig, StoragePaths},
+    config::{AppConfig, RuntimeState, StoragePaths},
     db::Database,
     event::EventRecord,
     recommend, stats,
@@ -28,9 +28,13 @@ pub fn run_stdio() -> Result<()> {
             continue;
         }
 
-        let request: McpRequest =
-            serde_json::from_str(&line).context("failed to parse MCP request")?;
-        let response = handle_request(request)?;
+        let response = match parse_request(&line) {
+            Ok(request) => match handle_request(request) {
+                Ok(response) => response,
+                Err(error) => McpResponse::error(json!(null), -32603, error.to_string()),
+            },
+            Err(response) => response,
+        };
         serde_json::to_writer(&mut writer, &response)
             .context("failed to serialize MCP response")?;
         writer.write_all(b"\n").context("failed to write MCP response")?;
@@ -53,10 +57,40 @@ pub fn handle_request(request: McpRequest) -> Result<McpResponse> {
         "initialize" => initialize_result(),
         "tools/list" => tools::list_result(),
         "tools/call" => {
-            let params = request.params.ok_or_else(|| anyhow!("missing tools/call params"))?;
-            let call: ToolCallParams =
-                serde_json::from_value(params).context("failed to decode tool call params")?;
-            handle_tool_call(call)?
+            let params = match request.params {
+                Some(params) => params,
+                None => {
+                    return Ok(McpResponse::error(
+                        request.id,
+                        -32602,
+                        "missing tools/call params".to_string(),
+                    ));
+                }
+            };
+            let call: ToolCallParams = match serde_json::from_value(params) {
+                Ok(call) => call,
+                Err(error) => {
+                    return Ok(McpResponse::error(
+                        request.id,
+                        -32602,
+                        format!("failed to decode tool call params: {error}"),
+                    ));
+                }
+            };
+            match handle_tool_call(call) {
+                Ok(result) => result,
+                Err(ToolCallError::UnknownTool(name)) => {
+                    return Ok(McpResponse::error(
+                        request.id,
+                        -32601,
+                        format!("unknown tool: {name}"),
+                    ));
+                }
+                Err(ToolCallError::InvalidParams(message)) => {
+                    return Ok(McpResponse::error(request.id, -32602, message));
+                }
+                Err(ToolCallError::Internal(error)) => return Err(error),
+            }
         }
         method => {
             return Ok(McpResponse::error(request.id, -32601, format!("unknown method: {method}")));
@@ -71,21 +105,26 @@ pub fn handle_request(request: McpRequest) -> Result<McpResponse> {
     })
 }
 
-fn handle_tool_call(call: ToolCallParams) -> Result<Value> {
-    let paths = StoragePaths::discover()?;
-    paths.ensure_dirs()?;
-    let config = AppConfig::load_or_create(&paths)?;
-    let database = Database::open(&paths.database_path())?.initialize()?;
+fn handle_tool_call(call: ToolCallParams) -> std::result::Result<Value, ToolCallError> {
+    let paths = StoragePaths::discover().map_err(ToolCallError::Internal)?;
+    paths.ensure_dirs().map_err(ToolCallError::Internal)?;
+    let config = AppConfig::load_or_create(&paths).map_err(ToolCallError::Internal)?;
+    let database = Database::open(&paths.database_path())
+        .and_then(Database::initialize)
+        .map_err(ToolCallError::Internal)?;
+    let state = RuntimeState::load(&paths).map_err(ToolCallError::Internal)?;
 
     match call.name.as_str() {
         "skilltrace.record_event" => {
-            let args: RecordEventArgs = serde_json::from_value(call.arguments)?;
+            let args: RecordEventArgs = serde_json::from_value(call.arguments)
+                .map_err(|error| ToolCallError::InvalidParams(error.to_string()))?;
             ensure_session(
                 &database,
                 &args.session_id,
                 args.agent.as_deref().unwrap_or("codex"),
                 args.adapter.as_deref().unwrap_or("mcp"),
-            )?;
+            )
+            .map_err(ToolCallError::Internal)?;
             let event = EventRecord::new(
                 args.event_type,
                 args.session_id,
@@ -106,15 +145,20 @@ fn handle_tool_call(call: ToolCallParams) -> Result<Value> {
                 args.tokens_output,
                 args.cost_usd,
             );
-            persist_event(&paths, &database, &event)?;
+            persist_event(&paths, &database, &event).map_err(ToolCallError::Internal)?;
             Ok(json!({ "event_id": event.id, "status": "recorded" }))
         }
         "skilltrace.record_skill_start" => {
-            let args: RecordSkillStartArgs = serde_json::from_value(call.arguments)?;
-            let session_id = args.session_id.unwrap_or_else(new_session_id);
+            let args: RecordSkillStartArgs = serde_json::from_value(call.arguments)
+                .map_err(|error| ToolCallError::InvalidParams(error.to_string()))?;
+            let session_id = args
+                .session_id
+                .or_else(|| state.preferred_session_id())
+                .unwrap_or_else(new_session_id);
             let agent = args.agent.unwrap_or_else(|| "codex".to_string());
             let adapter = args.adapter.unwrap_or_else(|| "mcp".to_string());
-            ensure_session(&database, &session_id, &agent, &adapter)?;
+            ensure_session(&database, &session_id, &agent, &adapter)
+                .map_err(ToolCallError::Internal)?;
             let event = EventRecord::new(
                 "skill_start".to_string(),
                 session_id,
@@ -135,34 +179,31 @@ fn handle_tool_call(call: ToolCallParams) -> Result<Value> {
                 None,
                 None,
             );
-            persist_event(&paths, &database, &event)?;
+            persist_event(&paths, &database, &event).map_err(ToolCallError::Internal)?;
             Ok(json!({ "event_id": event.id, "status": "recorded" }))
         }
         "skilltrace.record_skill_end" => {
-            let args: RecordSkillEndArgs = serde_json::from_value(call.arguments)?;
-            let timestamp = Utc::now().to_rfc3339();
-            let updated = database.update_event_from_skill_end(
-                &args.event_id,
-                &timestamp,
-                args.success,
-                args.output_summary.as_deref(),
-                args.error.as_deref(),
-            )?;
-            append_jsonl_snapshot(&paths, &updated)?;
+            let args: RecordSkillEndArgs = serde_json::from_value(call.arguments)
+                .map_err(|error| ToolCallError::InvalidParams(error.to_string()))?;
+            let completed =
+                complete_skill_event(&database, &args).map_err(ToolCallError::Internal)?;
+            persist_event(&paths, &database, &completed).map_err(ToolCallError::Internal)?;
             Ok(json!({
                 "status": "recorded",
-                "event_id": updated.id,
-                "duration_ms": updated.duration_ms
+                "event_id": completed.id,
+                "duration_ms": completed.duration_ms
             }))
         }
         "skilltrace.record_decision" => {
-            let args: RecordDecisionArgs = serde_json::from_value(call.arguments)?;
+            let args: RecordDecisionArgs = serde_json::from_value(call.arguments)
+                .map_err(|error| ToolCallError::InvalidParams(error.to_string()))?;
             ensure_session(
                 &database,
                 &args.session_id,
                 args.agent.as_deref().unwrap_or("codex"),
                 args.adapter.as_deref().unwrap_or("mcp"),
-            )?;
+            )
+            .map_err(ToolCallError::Internal)?;
             let event = EventRecord::new(
                 "decision".to_string(),
                 args.session_id,
@@ -183,40 +224,50 @@ fn handle_tool_call(call: ToolCallParams) -> Result<Value> {
                 None,
                 None,
             );
-            persist_event(&paths, &database, &event)?;
+            persist_event(&paths, &database, &event).map_err(ToolCallError::Internal)?;
             Ok(json!({ "event_id": event.id, "status": "recorded" }))
         }
         "skilltrace.get_stats" => {
-            let args: QueryFilterArgs = serde_json::from_value(call.arguments)?;
+            let args: QueryFilterArgs = serde_json::from_value(call.arguments)
+                .map_err(|error| ToolCallError::InvalidParams(error.to_string()))?;
             let query = stats::StatsQuery::from_filter_args(args.since, args.agent, args.skill);
-            let rows = database.skill_stats(
-                query.since_timestamp()?.as_deref(),
-                query.agent.as_deref(),
-                query.skill.as_deref(),
-            )?;
+            let rows = database
+                .skill_stats(
+                    query.since_timestamp().map_err(ToolCallError::Internal)?.as_deref(),
+                    query.agent.as_deref(),
+                    query.skill.as_deref(),
+                )
+                .map_err(ToolCallError::Internal)?;
             Ok(json!({ "skills": rows }))
         }
         "skilltrace.get_failures" => {
-            let args: QueryFilterArgs = serde_json::from_value(call.arguments)?;
+            let args: QueryFilterArgs = serde_json::from_value(call.arguments)
+                .map_err(|error| ToolCallError::InvalidParams(error.to_string()))?;
             let query = stats::StatsQuery::from_filter_args(args.since, args.agent, args.skill);
-            let rows = database.failures(
-                query.since_timestamp()?.as_deref(),
-                query.agent.as_deref(),
-                query.skill.as_deref(),
-            )?;
+            let rows = database
+                .failures(
+                    query.since_timestamp().map_err(ToolCallError::Internal)?.as_deref(),
+                    query.agent.as_deref(),
+                    query.skill.as_deref(),
+                )
+                .map_err(ToolCallError::Internal)?;
             Ok(json!({ "failures": rows }))
         }
         "skilltrace.get_recommendations" => {
-            let args: RecommendationArgs = serde_json::from_value(call.arguments)?;
+            let args: RecommendationArgs = serde_json::from_value(call.arguments)
+                .map_err(|error| ToolCallError::InvalidParams(error.to_string()))?;
             let cwd = args.cwd.as_deref().map(Path::new).unwrap_or_else(|| Path::new("."));
             let definition_file = config.resolved_definition_file(cwd);
-            let observed = database.observed_skills()?;
-            let skill_stats = database.skill_stats(None, args.agent.as_deref(), None)?;
+            let observed = database.observed_skills().map_err(ToolCallError::Internal)?;
+            let skill_stats = database
+                .skill_stats(None, args.agent.as_deref(), None)
+                .map_err(ToolCallError::Internal)?;
             let recommendations =
-                recommend::build_recommendations(&skill_stats, &definition_file, &observed)?;
+                recommend::build_recommendations(&skill_stats, &definition_file, &observed)
+                    .map_err(ToolCallError::Internal)?;
             Ok(json!({ "recommendations": recommendations }))
         }
-        name => Err(anyhow!("unknown tool: {name}")),
+        name => Err(ToolCallError::UnknownTool(name.to_string())),
     }
 }
 
@@ -260,6 +311,57 @@ fn initialize_result() -> Value {
 
 fn new_session_id() -> String {
     uuid::Uuid::new_v4().to_string()
+}
+
+fn parse_request(line: &str) -> std::result::Result<McpRequest, McpResponse> {
+    let value: Value = serde_json::from_str(line).map_err(|error| {
+        McpResponse::error(json!(null), -32700, format!("parse error: {error}"))
+    })?;
+    let id = value.get("id").cloned().unwrap_or_else(|| json!(null));
+    serde_json::from_value(value)
+        .map_err(|error| McpResponse::error(id, -32600, format!("invalid request: {error}")))
+}
+
+fn complete_skill_event(database: &Database, args: &RecordSkillEndArgs) -> Result<EventRecord> {
+    let start_event = database
+        .event_by_id(&args.event_id)?
+        .ok_or_else(|| anyhow!("event {} not found", args.event_id))?;
+    let ended_at = Utc::now().to_rfc3339();
+    let duration_ms =
+        chrono::DateTime::parse_from_rfc3339(&start_event.timestamp).ok().and_then(|started_at| {
+            chrono::DateTime::parse_from_rfc3339(&ended_at)
+                .ok()
+                .map(|ended| (ended - started_at).num_milliseconds())
+        });
+
+    let mut event = EventRecord::new(
+        "skill_end".to_string(),
+        start_event.session_id.clone(),
+        start_event.task_id.clone(),
+        start_event.skill.clone(),
+        start_event.agent.clone(),
+        start_event.adapter.clone(),
+        Some(args.success),
+        duration_ms,
+        args.error.clone(),
+        start_event.retry_count,
+        start_event.input_summary.clone(),
+        args.output_summary.clone().or(start_event.output_summary.clone()),
+        start_event.planner_reason.clone(),
+        start_event.confidence,
+        start_event.alternatives.clone(),
+        start_event.tokens_input,
+        start_event.tokens_output,
+        start_event.cost_usd,
+    );
+    event.timestamp = ended_at;
+    Ok(event)
+}
+
+enum ToolCallError {
+    UnknownTool(String),
+    InvalidParams(String),
+    Internal(anyhow::Error),
 }
 
 #[derive(Debug, Deserialize)]
@@ -383,7 +485,10 @@ mod tests {
     use serde_json::json;
     use tempfile::tempdir;
 
-    use crate::{config::StoragePaths, db::Database};
+    use crate::{
+        config::{RuntimeState, StoragePaths},
+        db::Database,
+    };
 
     use super::{McpRequest, handle_request};
 
@@ -392,7 +497,10 @@ mod tests {
         T: FnOnce(),
     {
         static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().expect("lock env");
+        let _guard = ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let home = tempdir().expect("tempdir");
         let previous_home = env::var_os("HOME");
         // Safety: test code controls process environment in a scoped single-threaded context.
@@ -502,12 +610,68 @@ mod tests {
                 .initialize()
                 .expect("init db");
             assert!(database.get_session("session-2").expect("get session").is_some());
+            let events = database.all_events().expect("all events");
+            assert_eq!(events.len(), 2);
+            assert_eq!(events[0].event_type, "skill_start");
+            assert_eq!(events[1].event_type, "skill_end");
 
             let jsonl = fs::read_to_string(paths.jsonl_path()).expect("read jsonl");
             assert_eq!(jsonl.lines().count(), 2);
             assert!(jsonl.contains("\"event_type\":\"skill_start\""));
             assert!(jsonl.contains("\"event_type\":\"skill_end\""));
         });
+    }
+
+    #[test]
+    fn skill_start_without_session_id_uses_single_active_runtime_session() {
+        with_temp_home(|| {
+            let paths = StoragePaths::discover().expect("paths");
+            paths.ensure_dirs().expect("ensure dirs");
+            RuntimeState {
+                current_session_id: Some("session-active".to_string()),
+                active_session_ids: vec!["session-active".to_string()],
+            }
+            .save(&paths)
+            .expect("save state");
+
+            let start = handle_request(McpRequest {
+                jsonrpc: "2.0".to_string(),
+                id: json!(1),
+                method: "tools/call".to_string(),
+                params: Some(json!({
+                    "name": "skilltrace.record_skill_start",
+                    "arguments": {
+                        "skill": "repo_search"
+                    }
+                })),
+            })
+            .expect("record_skill_start");
+
+            let event_id =
+                start.result.expect("result")["event_id"].as_str().expect("event id").to_string();
+            let database = Database::open(&paths.database_path())
+                .expect("open db")
+                .initialize()
+                .expect("init db");
+            let event = database.event_by_id(&event_id).expect("event").expect("existing");
+            assert_eq!(event.session_id, "session-active");
+        });
+    }
+
+    #[test]
+    fn invalid_tool_returns_jsonrpc_error_response() {
+        let response = handle_request(McpRequest {
+            jsonrpc: "2.0".to_string(),
+            id: json!(7),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "skilltrace.not_real",
+                "arguments": {}
+            })),
+        })
+        .expect("response");
+
+        assert_eq!(response.error.expect("error").code, -32601);
     }
 
     #[test]

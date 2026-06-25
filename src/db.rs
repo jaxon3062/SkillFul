@@ -1,6 +1,6 @@
-use std::path::Path;
+use std::{io::Write, path::Path, time::Duration};
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 
@@ -54,6 +54,9 @@ impl Database {
     pub fn open(path: &Path) -> Result<Self> {
         let connection = Connection::open(path)
             .with_context(|| format!("failed to open database {}", path.display()))?;
+        connection
+            .busy_timeout(Duration::from_secs(5))
+            .with_context(|| format!("failed to set busy timeout for {}", path.display()))?;
         Ok(Self { connection })
     }
 
@@ -164,40 +167,6 @@ impl Database {
             ],
         ).context("failed to insert event")?;
         Ok(())
-    }
-
-    pub fn update_event_from_skill_end(
-        &self,
-        event_id: &str,
-        timestamp: &str,
-        success: bool,
-        output_summary: Option<&str>,
-        error: Option<&str>,
-    ) -> Result<EventRecord> {
-        let existing =
-            self.event_by_id(event_id)?.ok_or_else(|| anyhow!("event {event_id} not found"))?;
-        let duration_ms =
-            chrono::DateTime::parse_from_rfc3339(&existing.timestamp).ok().and_then(|started_at| {
-                chrono::DateTime::parse_from_rfc3339(timestamp)
-                    .ok()
-                    .map(|ended_at| (ended_at - started_at).num_milliseconds())
-            });
-
-        self.connection
-            .execute(
-                "UPDATE events
-                 SET event_type = 'skill_end',
-                     timestamp = ?2,
-                     duration_ms = ?3,
-                     success = ?4,
-                     error = ?5,
-                     output_summary = COALESCE(?6, output_summary)
-                 WHERE id = ?1",
-                params![event_id, timestamp, duration_ms, success, error, output_summary],
-            )
-            .with_context(|| format!("failed to update event {event_id}"))?;
-
-        self.event_by_id(event_id)?.ok_or_else(|| anyhow!("event {event_id} missing after update"))
     }
 
     pub fn skill_stats(
@@ -329,6 +298,7 @@ impl Database {
         rows.collect::<rusqlite::Result<Vec<_>>>().context("failed to decode observed skills")
     }
 
+    #[cfg(test)]
     pub fn all_events(&self) -> Result<Vec<EventRecord>> {
         let mut statement = self
             .connection
@@ -374,6 +344,59 @@ impl Database {
             .context("failed to run event export query")?;
 
         rows.collect::<rusqlite::Result<Vec<_>>>().context("failed to decode event rows")
+    }
+
+    pub fn write_all_events_jsonl<W: Write>(&self, writer: &mut W) -> Result<()> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT
+                   id, session_id, task_id, event_type, skill, agent, adapter, timestamp, duration_ms,
+                   success, error, retry_count, input_summary, output_summary, planner_reason,
+                   confidence, alternatives_json, tokens_input, tokens_output, cost_usd, metadata_json
+                 FROM events
+                 ORDER BY timestamp ASC, id ASC",
+            )
+            .context("failed to prepare event export query")?;
+
+        let rows = statement
+            .query_map([], |row| {
+                let alternatives_json: String = row.get(16)?;
+                let alternatives = serde_json::from_str(&alternatives_json).unwrap_or_default();
+
+                Ok(EventRecord {
+                    id: row.get(0)?,
+                    session_id: row.get(1)?,
+                    task_id: row.get(2)?,
+                    event_type: row.get(3)?,
+                    skill: row.get(4)?,
+                    agent: row.get(5)?,
+                    adapter: row.get(6)?,
+                    timestamp: row.get(7)?,
+                    duration_ms: row.get(8)?,
+                    success: row.get(9)?,
+                    error: row.get(10)?,
+                    retry_count: row.get(11)?,
+                    input_summary: row.get(12)?,
+                    output_summary: row.get(13)?,
+                    planner_reason: row.get(14)?,
+                    confidence: row.get(15)?,
+                    alternatives,
+                    tokens_input: row.get(17)?,
+                    tokens_output: row.get(18)?,
+                    cost_usd: row.get(19)?,
+                    metadata_json: row.get(20)?,
+                })
+            })
+            .context("failed to run event export query")?;
+
+        for row in rows {
+            let event = row.context("failed to decode event row")?;
+            writeln!(writer, "{}", serde_json::to_string(&event)?)
+                .context("failed to stream JSONL event")?;
+        }
+
+        Ok(())
     }
 
     pub fn event_by_id(&self, event_id: &str) -> Result<Option<EventRecord>> {

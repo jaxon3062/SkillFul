@@ -134,14 +134,17 @@ impl AppConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeState {
+    #[serde(default)]
     pub current_session_id: Option<String>,
+    #[serde(default)]
+    pub active_session_ids: Vec<String>,
 }
 
 impl RuntimeState {
     pub fn load(paths: &StoragePaths) -> Result<Self> {
         let path = paths.state_path();
         if !path.exists() {
-            return Ok(Self { current_session_id: None });
+            return Ok(Self { current_session_id: None, active_session_ids: Vec::new() });
         }
 
         let contents = fs::read_to_string(&path)
@@ -153,6 +156,29 @@ impl RuntimeState {
         let contents = toml::to_string(self).context("failed to serialize runtime state")?;
         fs::write(paths.state_path(), contents)
             .with_context(|| format!("failed to write {}", paths.state_path().display()))
+    }
+
+    pub fn register_session(&mut self, session_id: &str) {
+        if !self.active_session_ids.iter().any(|active| active == session_id) {
+            self.active_session_ids.push(session_id.to_string());
+        }
+        self.current_session_id = Some(session_id.to_string());
+    }
+
+    pub fn unregister_session(&mut self, session_id: &str) {
+        self.active_session_ids.retain(|active| active != session_id);
+        self.current_session_id = match self.active_session_ids.as_slice() {
+            [single] => Some(single.clone()),
+            _ => None,
+        };
+    }
+
+    pub fn preferred_session_id(&self) -> Option<String> {
+        match self.active_session_ids.as_slice() {
+            [single] => Some(single.clone()),
+            [] => self.current_session_id.clone(),
+            _ => None,
+        }
     }
 }
 
@@ -201,7 +227,7 @@ pub fn resolve_path(base_dir: &Path, path: &Path) -> PathBuf {
 mod tests {
     use std::path::Path;
 
-    use super::{AppConfig, resolve_path};
+    use super::{AppConfig, RuntimeState, resolve_path};
 
     #[test]
     fn configured_definition_file_resolves_from_working_directory() {
@@ -235,5 +261,14 @@ mod tests {
             resolve_path(Path::new("/repo"), Path::new("nested/skills.toml")),
             Path::new("/repo/nested/skills.toml")
         );
+    }
+
+    #[test]
+    fn preferred_session_id_is_none_when_multiple_sessions_are_active() {
+        let mut state = RuntimeState { current_session_id: None, active_session_ids: Vec::new() };
+        state.register_session("session-a");
+        state.register_session("session-b");
+
+        assert_eq!(state.preferred_session_id(), None);
     }
 }

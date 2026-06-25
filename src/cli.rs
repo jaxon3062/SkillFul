@@ -163,7 +163,7 @@ fn init_command() -> Result<()> {
     paths.ensure_dirs()?;
     AppConfig::write_default_if_missing(&paths)?;
     Database::open(&paths.database_path())?.initialize()?;
-    RuntimeState { current_session_id: None }.save(&paths)?;
+    RuntimeState { current_session_id: None, active_session_ids: Vec::new() }.save(&paths)?;
 
     println!("Initialized skilltrace at {}", paths.root.display());
     Ok(())
@@ -171,15 +171,20 @@ fn init_command() -> Result<()> {
 
 fn wrap_command(args: WrapArgs) -> Result<()> {
     let _supported_adapters = crate::adapters::supported_adapters();
+    if args.command.is_empty() {
+        anyhow::bail!("wrap requires a command to execute");
+    }
     let paths = StoragePaths::discover()?;
     paths.ensure_dirs()?;
     let config = AppConfig::load_or_create(&paths)?;
     let database = Database::open(&paths.database_path())?.initialize()?;
+    let mut state = RuntimeState::load(&paths)?;
 
     let (agent, adapter) = infer_wrapper_identity(&args.command);
     let session = SessionRecord::new(agent.clone(), adapter.clone(), current_working_directory());
     database.upsert_session(&session)?;
-    RuntimeState { current_session_id: Some(session.id.clone()) }.save(&paths)?;
+    state.register_session(&session.id);
+    state.save(&paths)?;
 
     record_event(
         &database,
@@ -242,7 +247,8 @@ fn wrap_command(args: WrapArgs) -> Result<()> {
                 ),
             )?;
             database.mark_session_ended(&session.id, &Utc::now().to_rfc3339())?;
-            RuntimeState { current_session_id: None }.save(&paths)?;
+            state.unregister_session(&session.id);
+            state.save(&paths)?;
 
             if success { Ok(()) } else { Err(WrappedCommandExit::from_status(status).into()) }
         }
@@ -272,7 +278,8 @@ fn wrap_command(args: WrapArgs) -> Result<()> {
                 ),
             )?;
             database.mark_session_ended(&session.id, &Utc::now().to_rfc3339())?;
-            RuntimeState { current_session_id: None }.save(&paths)?;
+            state.unregister_session(&session.id);
+            state.save(&paths)?;
             Err(error).context("failed to execute wrapped command")
         }
     }
@@ -308,7 +315,7 @@ fn event_command(args: EventArgs) -> Result<()> {
     let database = Database::open(&paths.database_path())?.initialize()?;
     let mut state = RuntimeState::load(&paths)?;
 
-    let session_id = match (&args.kind, args.session_id.clone(), state.current_session_id.clone()) {
+    let session_id = match (&args.kind, args.session_id.clone(), state.preferred_session_id()) {
         (EventKind::SessionStart, Some(session_id), _) => session_id,
         (EventKind::SessionStart, None, _) => {
             let session = SessionRecord::new(
@@ -318,7 +325,7 @@ fn event_command(args: EventArgs) -> Result<()> {
             );
             let session_id = session.id.clone();
             database.upsert_session(&session)?;
-            state.current_session_id = Some(session_id.clone());
+            state.register_session(&session_id);
             state.save(&paths)?;
             session_id
         }
@@ -332,7 +339,7 @@ fn event_command(args: EventArgs) -> Result<()> {
             );
             let session_id = session.id.clone();
             database.upsert_session(&session)?;
-            state.current_session_id = Some(session_id.clone());
+            state.register_session(&session_id);
             state.save(&paths)?;
             session_id
         }
@@ -372,10 +379,8 @@ fn event_command(args: EventArgs) -> Result<()> {
 
     if matches!(args.kind, EventKind::SessionEnd) {
         database.mark_session_ended(&session_id, &Utc::now().to_rfc3339())?;
-        if state.current_session_id.as_deref() == Some(session_id.as_str()) {
-            state.current_session_id = None;
-            state.save(&paths)?;
-        }
+        state.unregister_session(&session_id);
+        state.save(&paths)?;
     }
 
     println!("{}", serde_json::to_string_pretty(&record)?);
@@ -453,7 +458,7 @@ fn export_command(args: ExportArgs) -> Result<()> {
     let database = Database::open(&paths.database_path())?.initialize()?;
 
     match args.kind {
-        ExportKind::Jsonl => println!("{}", export::jsonl::export_events(&database)?),
+        ExportKind::Jsonl => export::jsonl::write_events(&database, &mut std::io::stdout().lock())?,
         ExportKind::Otel => println!("{}", export::otel::export_stub()),
     };
     Ok(())
