@@ -40,7 +40,7 @@ pub fn render_skill_stats(rows: &[SkillStatsRow]) -> String {
             "{:<14} {:<6} {:<14} {:<8} {:<8} {}",
             row.skill,
             row.uses,
-            format!("{:.2}", row.success_rate.unwrap_or(0.0)),
+            format_success_rate(row.success_rate),
             format!("{:.0}", row.avg_duration_ms.unwrap_or(0.0)),
             row.retries,
             row.failures
@@ -122,6 +122,10 @@ fn short_timestamp(timestamp: &str) -> String {
         .unwrap_or_else(|_| timestamp.to_string())
 }
 
+fn format_success_rate(success_rate: Option<f64>) -> String {
+    success_rate.map(|value| format!("{value:.2}")).unwrap_or_else(|| "unknown".to_string())
+}
+
 pub struct UnusedSkillsReport {
     names: Vec<String>,
 }
@@ -168,4 +172,26 @@ struct SkillsFile {
 #[derive(Debug, Deserialize)]
 struct SkillDefinition {
     name: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::db::SkillStatsRow;
+
+    use super::render_skill_stats;
+
+    #[test]
+    fn render_skill_stats_shows_unknown_for_missing_success() {
+        let rendered = render_skill_stats(&[SkillStatsRow {
+            skill: "run_tests".to_string(),
+            uses: 1,
+            success_rate: None,
+            avg_duration_ms: Some(250.0),
+            retries: 0,
+            failures: 0,
+        }]);
+
+        assert!(rendered.contains("unknown"));
+        assert!(!rendered.contains("0.00"));
+    }
 }

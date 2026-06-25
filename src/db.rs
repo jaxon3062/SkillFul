@@ -177,7 +177,11 @@ impl Database {
                 "SELECT
                skill,
                COUNT(*) AS uses,
-               AVG(CASE WHEN success THEN 1.0 ELSE 0.0 END) AS success_rate,
+               AVG(CASE
+                     WHEN success = 1 THEN 1.0
+                     WHEN success = 0 THEN 0.0
+                     ELSE NULL
+                   END) AS success_rate,
                AVG(duration_ms) AS avg_duration_ms,
                SUM(retry_count) AS retries,
                SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) AS failures
@@ -374,4 +378,51 @@ pub struct FailureRow {
     pub error: Option<String>,
     pub retry_count: i64,
     pub output_summary: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use tempfile::tempdir;
+
+    use super::Database;
+    use crate::event::EventRecord;
+
+    #[test]
+    fn skill_stats_leave_missing_success_as_unknown() {
+        let temp = tempdir().expect("tempdir");
+        let database = Database::open(&temp.path().join("skilltrace.db"))
+            .expect("open db")
+            .initialize()
+            .expect("init db");
+
+        database
+            .insert_event(&EventRecord::new(
+                "skill_end".to_string(),
+                "session-1".to_string(),
+                None,
+                Some("run_tests".to_string()),
+                "codex".to_string(),
+                "manual".to_string(),
+                None,
+                Some(250),
+                None,
+                0,
+                None,
+                None,
+                None,
+                None,
+                Vec::new(),
+                None,
+                None,
+                None,
+            ))
+            .expect("insert event");
+
+        let rows = database.skill_stats(None, None, None).expect("stats");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].skill, "run_tests");
+        assert_eq!(rows[0].uses, 1);
+        assert_eq!(rows[0].success_rate, None);
+        assert_eq!(rows[0].failures, 0);
+    }
 }
