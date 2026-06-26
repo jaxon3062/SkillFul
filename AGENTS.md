@@ -34,14 +34,16 @@ Implemented today:
 - reporting via `stats`, `timeline`, `failures`, `unused`, and `recommend`
 - process wrapper session tracing via `skilltrace wrap <command>`
 - stdio MCP server with working tool handlers
-- privacy/default fixes from repository review
-- test coverage for wrapper privacy/exit behavior, skill-definition resolution, and MCP request handling
+- review-driven correctness/privacy fixes
+- recommendation heuristics for overlap/co-occurrence and 30-day inactivity
+- hashing/redaction for sensitive summary fields before persistence/output
+- test coverage for wrapper privacy/exit behavior, skill-definition resolution, MCP request handling, and privacy hashing
 
 Not implemented yet:
 
 - rich wrapper boundary detection for commands/tool calls inside wrapped processes
-- stronger secret hashing/redaction beyond the current summary-only defaults
-- advanced recommendation heuristics such as co-occurrence/overlap analysis and time-windowed inactivity
+- stronger secret detection/redaction beyond the current summary-field hashing
+- deeper recommendation heuristics such as multi-skill chain analysis and time-windowed correlations beyond the current overlap/inactivity rules
 - non-stdio MCP transports
 - adapters beyond the current Codex-first baseline
 - OpenTelemetry export/serve functionality
@@ -59,11 +61,13 @@ Completed:
 - MCP stdio server
 - data-backed stats/failures/timeline/recommend
 - review-driven correctness/privacy fixes
+- overlap/inactivity recommendation heuristics
+- summary-field sensitive value hashing
 
 Remaining in Phase 1:
 
 - richer wrapper event capture inside wrapped sessions
-- more capable recommendations
+- more capable multi-event and chain-aware recommendations
 - better session correlation across concurrent/long-lived agent workflows
 - stronger privacy controls for any future raw capture
 
@@ -145,10 +149,12 @@ Planned:
 │   │   ├── mod.rs
 │   │   ├── server.rs
 │   │   └── tools.rs
+│   ├── privacy.rs
 │   ├── recommend.rs
 │   └── stats.rs
 ├── tests
 │   ├── mcp.rs
+│   ├── privacy.rs
 │   ├── skills_resolution.rs
 │   └── wrap.rs
 └── tmp
@@ -188,11 +194,14 @@ Planned:
 - `src/mcp/tools.rs`
   - MCP tool metadata / schema surface
 
+- `src/privacy.rs`
+  - summary-field hashing/redaction helpers driven by privacy config
+
 - `src/stats.rs`
   - rendering and filter parsing
 
 - `src/recommend.rs`
-  - current heuristic recommendation logic
+  - current heuristic recommendation logic including overlap/inactivity signals
 
 - `src/export/jsonl.rs`
   - streaming JSONL export path
@@ -246,15 +255,16 @@ When touching a focused area, run the narrowest useful suite first:
 
 - `cargo test wrap`
 - `cargo test mcp`
+- `cargo test privacy`
 - `cargo test skills_resolution`
 
 ## Known Gaps
 
 These are active backlog items, not accidental omissions:
 
-- recommendation logic is still heuristic and shallow
+- recommendation logic is improved but still heuristic rather than chain-aware
 - wrapper tracing only captures session-level behavior, not internal tool boundaries
-- privacy config fields like `hash_sensitive_values` are not fully implemented end-to-end
+- privacy hashing currently covers summary-like fields, not future raw capture paths
 - `otel` export is still placeholder-only
 - concurrent multi-process session semantics are improved but not fully modeled as first-class session leases/locks
 
@@ -301,5 +311,7 @@ Recent milestone commits:
 - `ea4b7f5` Implement stdio MCP tool handlers
 - `a94901a` Keep MCP session and JSONL state consistent
 - `77e45e9` Resolve core issues from repository review
+- `7d43f69` Improve recommendation heuristics
+- `1e4eecd` Hash sensitive event summaries
 
 Use these as checkpoints when reasoning about why the current code looks the way it does.
