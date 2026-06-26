@@ -5,6 +5,7 @@ mod db;
 mod event;
 mod export;
 mod mcp;
+mod privacy;
 mod recommend;
 mod stats;
 

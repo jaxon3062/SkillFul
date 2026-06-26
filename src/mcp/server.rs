@@ -12,7 +12,7 @@ use crate::{
     config::{AppConfig, RuntimeState, StoragePaths},
     db::Database,
     event::EventRecord,
-    recommend, stats,
+    privacy, recommend, stats,
 };
 
 use super::tools;
@@ -145,7 +145,8 @@ fn handle_tool_call(call: ToolCallParams) -> std::result::Result<Value, ToolCall
                 args.tokens_output,
                 args.cost_usd,
             );
-            persist_event(&paths, &database, &event).map_err(ToolCallError::Internal)?;
+            persist_event(&paths, &database, &config.privacy, &event)
+                .map_err(ToolCallError::Internal)?;
             Ok(json!({ "event_id": event.id, "status": "recorded" }))
         }
         "skilltrace.record_skill_start" => {
@@ -179,7 +180,8 @@ fn handle_tool_call(call: ToolCallParams) -> std::result::Result<Value, ToolCall
                 None,
                 None,
             );
-            persist_event(&paths, &database, &event).map_err(ToolCallError::Internal)?;
+            persist_event(&paths, &database, &config.privacy, &event)
+                .map_err(ToolCallError::Internal)?;
             Ok(json!({ "event_id": event.id, "status": "recorded" }))
         }
         "skilltrace.record_skill_end" => {
@@ -187,7 +189,8 @@ fn handle_tool_call(call: ToolCallParams) -> std::result::Result<Value, ToolCall
                 .map_err(|error| ToolCallError::InvalidParams(error.to_string()))?;
             let completed =
                 complete_skill_event(&database, &args).map_err(ToolCallError::Internal)?;
-            persist_event(&paths, &database, &completed).map_err(ToolCallError::Internal)?;
+            persist_event(&paths, &database, &config.privacy, &completed)
+                .map_err(ToolCallError::Internal)?;
             Ok(json!({
                 "status": "recorded",
                 "event_id": completed.id,
@@ -224,7 +227,8 @@ fn handle_tool_call(call: ToolCallParams) -> std::result::Result<Value, ToolCall
                 None,
                 None,
             );
-            persist_event(&paths, &database, &event).map_err(ToolCallError::Internal)?;
+            persist_event(&paths, &database, &config.privacy, &event)
+                .map_err(ToolCallError::Internal)?;
             Ok(json!({ "event_id": event.id, "status": "recorded" }))
         }
         "skilltrace.get_stats" => {
@@ -280,9 +284,16 @@ fn handle_tool_call(call: ToolCallParams) -> std::result::Result<Value, ToolCall
     }
 }
 
-fn persist_event(paths: &StoragePaths, database: &Database, event: &EventRecord) -> Result<()> {
-    database.insert_event(event)?;
-    append_jsonl_snapshot(paths, event)
+fn persist_event(
+    paths: &StoragePaths,
+    database: &Database,
+    privacy_config: &crate::config::PrivacyConfig,
+    event: &EventRecord,
+) -> Result<()> {
+    let mut sanitized = event.clone();
+    privacy::sanitize_event(&mut sanitized, privacy_config);
+    database.insert_event(&sanitized)?;
+    append_jsonl_snapshot(paths, &sanitized)
 }
 
 fn append_jsonl_snapshot(paths: &StoragePaths, event: &EventRecord) -> Result<()> {

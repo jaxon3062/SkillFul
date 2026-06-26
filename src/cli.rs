@@ -14,7 +14,7 @@ use crate::{
     config::{AppConfig, RuntimeState, SessionRecord, StoragePaths},
     db::Database,
     event::EventRecord,
-    export, mcp, recommend, stats,
+    export, mcp, privacy, recommend, stats,
 };
 
 #[derive(Debug, Parser)]
@@ -189,6 +189,7 @@ fn wrap_command(args: WrapArgs) -> Result<()> {
     record_event(
         &database,
         &paths,
+        &config.privacy,
         EventRecord::new(
             "session_start".to_string(),
             session.id.clone(),
@@ -225,6 +226,7 @@ fn wrap_command(args: WrapArgs) -> Result<()> {
             record_event(
                 &database,
                 &paths,
+                &config.privacy,
                 EventRecord::new(
                     "session_end".to_string(),
                     session.id.clone(),
@@ -256,6 +258,7 @@ fn wrap_command(args: WrapArgs) -> Result<()> {
             record_event(
                 &database,
                 &paths,
+                &config.privacy,
                 EventRecord::new(
                     "error".to_string(),
                     session.id.clone(),
@@ -311,7 +314,7 @@ impl std::error::Error for WrappedCommandExit {}
 fn event_command(args: EventArgs) -> Result<()> {
     let paths = StoragePaths::discover()?;
     paths.ensure_dirs()?;
-    AppConfig::write_default_if_missing(&paths)?;
+    let config = AppConfig::load_or_create(&paths)?;
     let database = Database::open(&paths.database_path())?.initialize()?;
     let mut state = RuntimeState::load(&paths)?;
 
@@ -355,7 +358,7 @@ fn event_command(args: EventArgs) -> Result<()> {
         database.upsert_session(&session)?;
     }
 
-    let record = EventRecord::new(
+    let mut record = EventRecord::new(
         args.kind.as_event_type().to_string(),
         session_id.clone(),
         args.task_id,
@@ -375,7 +378,8 @@ fn event_command(args: EventArgs) -> Result<()> {
         args.tokens_output,
         args.cost_usd,
     );
-    record_event(&database, &paths, record.clone())?;
+    privacy::sanitize_event(&mut record, &config.privacy);
+    record_event(&database, &paths, &config.privacy, record.clone())?;
 
     if matches!(args.kind, EventKind::SessionEnd) {
         database.mark_session_ended(&session_id, &Utc::now().to_rfc3339())?;
@@ -485,7 +489,13 @@ fn append_jsonl(paths: &StoragePaths, event: &EventRecord) -> Result<()> {
     writeln!(file, "{}", serde_json::to_string(event)?).context("failed to append JSONL event")
 }
 
-fn record_event(database: &Database, paths: &StoragePaths, event: EventRecord) -> Result<()> {
+fn record_event(
+    database: &Database,
+    paths: &StoragePaths,
+    privacy_config: &crate::config::PrivacyConfig,
+    mut event: EventRecord,
+) -> Result<()> {
+    privacy::sanitize_event(&mut event, privacy_config);
     database.insert_event(&event)?;
     append_jsonl(paths, &event)
 }
