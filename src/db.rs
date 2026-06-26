@@ -298,6 +298,67 @@ impl Database {
         rows.collect::<rusqlite::Result<Vec<_>>>().context("failed to decode observed skills")
     }
 
+    pub fn skill_history(&self, agent: Option<&str>) -> Result<Vec<SkillHistoryRow>> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT skill, MAX(timestamp) AS last_seen, COUNT(DISTINCT session_id) AS sessions
+                 FROM events
+                 WHERE skill IS NOT NULL
+                   AND event_type = 'skill_end'
+                   AND (?1 IS NULL OR agent = ?1)
+                 GROUP BY skill
+                 ORDER BY skill ASC",
+            )
+            .context("failed to prepare skill history query")?;
+
+        let rows = statement
+            .query_map(params![agent], |row| {
+                Ok(SkillHistoryRow {
+                    skill: row.get(0)?,
+                    last_seen: row.get(1)?,
+                    sessions: row.get(2)?,
+                })
+            })
+            .context("failed to run skill history query")?;
+
+        rows.collect::<rusqlite::Result<Vec<_>>>().context("failed to decode skill history rows")
+    }
+
+    pub fn skill_overlap(&self, agent: Option<&str>) -> Result<Vec<SkillOverlapRow>> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "WITH session_skills AS (
+                   SELECT DISTINCT session_id, skill
+                   FROM events
+                   WHERE skill IS NOT NULL
+                     AND event_type = 'skill_end'
+                     AND (?1 IS NULL OR agent = ?1)
+                 )
+                 SELECT a.skill, b.skill, COUNT(*) AS shared_sessions
+                 FROM session_skills a
+                 JOIN session_skills b
+                   ON a.session_id = b.session_id
+                  AND a.skill < b.skill
+                 GROUP BY a.skill, b.skill
+                 ORDER BY shared_sessions DESC, a.skill ASC, b.skill ASC",
+            )
+            .context("failed to prepare skill overlap query")?;
+
+        let rows = statement
+            .query_map(params![agent], |row| {
+                Ok(SkillOverlapRow {
+                    left_skill: row.get(0)?,
+                    right_skill: row.get(1)?,
+                    shared_sessions: row.get(2)?,
+                })
+            })
+            .context("failed to run skill overlap query")?;
+
+        rows.collect::<rusqlite::Result<Vec<_>>>().context("failed to decode skill overlap rows")
+    }
+
     #[cfg(test)]
     pub fn all_events(&self) -> Result<Vec<EventRecord>> {
         let mut statement = self
@@ -479,6 +540,20 @@ pub struct FailureRow {
     pub error: Option<String>,
     pub retry_count: i64,
     pub output_summary: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SkillHistoryRow {
+    pub skill: String,
+    pub last_seen: String,
+    pub sessions: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SkillOverlapRow {
+    pub left_skill: String,
+    pub right_skill: String,
+    pub shared_sessions: i64,
 }
 
 #[cfg(test)]

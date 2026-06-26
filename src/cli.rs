@@ -440,10 +440,14 @@ fn recommend_command() -> Result<()> {
     let database = Database::open(&paths.database_path())?.initialize()?;
     let observed = database.observed_skills()?;
     let stats_rows = database.skill_stats(None, None, None)?;
+    let history_rows = database.skill_history(None)?;
+    let overlap_rows = database.skill_overlap(None)?;
     let recommendations = recommend::build_recommendations(
         &stats_rows,
         &resolve_defined_skills_path(None, &config)?,
         &observed,
+        &history_rows,
+        &overlap_rows,
     )?;
 
     println!("Recommendations:");
