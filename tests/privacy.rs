@@ -79,3 +79,82 @@ fn event_hashes_plain_authorization_bearer_output_summary_by_default() {
     assert!(!jsonl.contains("opaquevalue"));
     assert!(jsonl.contains("Authorization: Bearer sha256:"));
 }
+
+#[test]
+fn privacy_event_hashes_url_query_secrets_by_default() {
+    let home = isolated_home();
+
+    let output = Command::new(binary())
+        .env("HOME", home.path())
+        .args([
+            "event",
+            "error",
+            "--input-summary",
+            "GET https://example.test/path?token=super-secret-token&safe=value",
+        ])
+        .output()
+        .expect("run event");
+
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    let jsonl = fs::read_to_string(home.path().join(".skilltrace/events.jsonl")).expect("jsonl");
+
+    assert!(!stdout.contains("super-secret-token"));
+    assert!(!jsonl.contains("super-secret-token"));
+    assert!(jsonl.contains("token=sha256:"));
+    assert!(jsonl.contains("safe=value"));
+}
+
+#[test]
+fn privacy_event_hashes_json_like_secret_fields_by_default() {
+    let home = isolated_home();
+
+    let output = Command::new(binary())
+        .env("HOME", home.path())
+        .args([
+            "event",
+            "error",
+            "--output-summary",
+            r#"{"api_key":"abc123secret","safe":"visible"}"#,
+        ])
+        .output()
+        .expect("run event");
+
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    let jsonl = fs::read_to_string(home.path().join(".skilltrace/events.jsonl")).expect("jsonl");
+
+    assert!(!stdout.contains("abc123secret"));
+    assert!(!jsonl.contains("abc123secret"));
+    assert!(jsonl.contains("api_key"));
+    assert!(jsonl.contains("sha256:"));
+    assert!(jsonl.contains(r#"\"safe\":\"visible\""#));
+}
+
+#[test]
+fn privacy_event_hashes_spaced_json_like_secret_fields_by_default() {
+    let home = isolated_home();
+
+    let output = Command::new(binary())
+        .env("HOME", home.path())
+        .args([
+            "event",
+            "error",
+            "--output-summary",
+            r#"{"api_key": "abc123secret", "safe": "visible"}"#,
+        ])
+        .output()
+        .expect("run event");
+
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    let jsonl = fs::read_to_string(home.path().join(".skilltrace/events.jsonl")).expect("jsonl");
+
+    assert!(!stdout.contains("abc123secret"));
+    assert!(!jsonl.contains("abc123secret"));
+    assert!(stdout.contains(r#"\"safe\": \"visible\""#));
+    assert!(jsonl.contains(r#"\"safe\": \"visible\""#));
+}
