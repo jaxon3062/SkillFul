@@ -9,7 +9,7 @@ use chrono::{DateTime, Duration, Utc};
 use serde::Deserialize;
 
 use crate::{
-    db::{SkillHistoryRow, SkillOverlapRow, SkillStatsRow},
+    db::{SkillChainRow, SkillHistoryRow, SkillOverlapRow, SkillStatsRow},
     stats::UnusedSkillsReport,
 };
 
@@ -19,6 +19,7 @@ pub fn build_recommendations(
     observed_skills: &[String],
     skill_history: &[SkillHistoryRow],
     skill_overlap: &[SkillOverlapRow],
+    skill_chains: &[SkillChainRow],
 ) -> Result<Vec<String>> {
     let mut recommendations = Vec::new();
     let declared_skills = declared_skills(defined_skills_path)?;
@@ -102,6 +103,15 @@ pub fn build_recommendations(
         }
     }
 
+    for chain in skill_chains {
+        if chain.count >= 2 {
+            recommendations.push(format!(
+                "Review chain `{}` -> `{}`. Reason: observed as an adjacent skill sequence {} times.",
+                chain.left_skill, chain.right_skill, chain.count
+            ));
+        }
+    }
+
     if recommendations.is_empty() {
         recommendations.push(
             "No obvious changes recommended yet. Record more skill_end events to improve signal."
@@ -136,7 +146,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::build_recommendations;
-    use crate::db::{SkillHistoryRow, SkillOverlapRow, SkillStatsRow};
+    use crate::db::{SkillChainRow, SkillHistoryRow, SkillOverlapRow, SkillStatsRow};
 
     #[test]
     fn missing_success_rate_does_not_trigger_improve_recommendation() {
@@ -164,6 +174,7 @@ mod tests {
                 last_seen: Utc::now().to_rfc3339(),
                 sessions: 1,
             }],
+            &[],
             &[],
         )
         .expect("recommendations");
@@ -200,6 +211,7 @@ mod tests {
                 last_seen: (Utc::now() - Duration::days(45)).to_rfc3339(),
                 sessions: 4,
             }],
+            &[],
             &[],
         )
         .expect("recommendations");
@@ -241,11 +253,41 @@ mod tests {
                 right_skill: "repo_search".to_string(),
                 shared_sessions: 3,
             }],
+            &[],
         )
         .expect("recommendations");
 
         assert!(recommendations.iter().any(|line| {
             line.contains("Consider merging or clarifying `code_search` and `repo_search`")
+        }));
+    }
+
+    #[test]
+    fn repeated_adjacent_skill_chain_triggers_review_recommendation() {
+        let temp = tempdir().expect("tempdir");
+        let skills_path = temp.path().join("skills.toml");
+        fs::write(
+            &skills_path,
+            "[[skill]]\nname = \"repo_search\"\ndescription = \"Search\"\ncategory = \"retrieval\"\n[[skill]]\nname = \"edit_file\"\ndescription = \"Edit\"\ncategory = \"editing\"\n",
+        )
+        .expect("write skills");
+
+        let recommendations = build_recommendations(
+            &[],
+            &skills_path,
+            &["edit_file".to_string(), "repo_search".to_string()],
+            &[],
+            &[],
+            &[SkillChainRow {
+                left_skill: "repo_search".to_string(),
+                right_skill: "edit_file".to_string(),
+                count: 2,
+            }],
+        )
+        .expect("recommendations");
+
+        assert!(recommendations.iter().any(|line| {
+            line == "Review chain `repo_search` -> `edit_file`. Reason: observed as an adjacent skill sequence 2 times."
         }));
     }
 }

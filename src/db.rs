@@ -359,6 +359,44 @@ impl Database {
         rows.collect::<rusqlite::Result<Vec<_>>>().context("failed to decode skill overlap rows")
     }
 
+    pub fn skill_chains(&self, agent: Option<&str>) -> Result<Vec<SkillChainRow>> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "WITH ordered_skill_events AS (
+                   SELECT
+                     session_id,
+                     skill AS left_skill,
+                     LEAD(skill) OVER (
+                       PARTITION BY session_id
+                       ORDER BY timestamp ASC, id ASC
+                     ) AS right_skill
+                   FROM events
+                   WHERE skill IS NOT NULL
+                     AND event_type = 'skill_end'
+                     AND (?1 IS NULL OR agent = ?1)
+                 )
+                 SELECT left_skill, right_skill, COUNT(*) AS count
+                 FROM ordered_skill_events
+                 WHERE right_skill IS NOT NULL
+                 GROUP BY left_skill, right_skill
+                 ORDER BY count DESC, left_skill ASC, right_skill ASC",
+            )
+            .context("failed to prepare skill chains query")?;
+
+        let rows = statement
+            .query_map(params![agent], |row| {
+                Ok(SkillChainRow {
+                    left_skill: row.get(0)?,
+                    right_skill: row.get(1)?,
+                    count: row.get(2)?,
+                })
+            })
+            .context("failed to run skill chains query")?;
+
+        rows.collect::<rusqlite::Result<Vec<_>>>().context("failed to decode skill chain rows")
+    }
+
     #[cfg(test)]
     pub fn all_events(&self) -> Result<Vec<EventRecord>> {
         let mut statement = self
@@ -556,6 +594,13 @@ pub struct SkillOverlapRow {
     pub shared_sessions: i64,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct SkillChainRow {
+    pub left_skill: String,
+    pub right_skill: String,
+    pub count: i64,
+}
+
 #[cfg(test)]
 mod tests {
     use tempfile::tempdir;
@@ -600,5 +645,52 @@ mod tests {
         assert_eq!(rows[0].uses, 1);
         assert_eq!(rows[0].success_rate, None);
         assert_eq!(rows[0].failures, 0);
+    }
+
+    #[test]
+    fn skill_chains_count_adjacent_skill_end_pairs_across_sessions() {
+        let temp = tempdir().expect("tempdir");
+        let database = Database::open(&temp.path().join("skilltrace.db"))
+            .expect("open db")
+            .initialize()
+            .expect("init db");
+
+        for (id, session_id, timestamp, skill) in [
+            ("event-1", "session-1", "2026-06-28T00:00:00Z", "repo_search"),
+            ("event-2", "session-1", "2026-06-28T00:00:01Z", "edit_file"),
+            ("event-3", "session-1", "2026-06-28T00:00:02Z", "run_tests"),
+            ("event-4", "session-2", "2026-06-28T00:00:00Z", "repo_search"),
+            ("event-5", "session-2", "2026-06-28T00:00:01Z", "edit_file"),
+        ] {
+            let mut event = EventRecord::new(
+                "skill_end".to_string(),
+                session_id.to_string(),
+                None,
+                Some(skill.to_string()),
+                "codex".to_string(),
+                "manual".to_string(),
+                Some(true),
+                None,
+                None,
+                0,
+                None,
+                None,
+                None,
+                None,
+                Vec::new(),
+                None,
+                None,
+                None,
+            );
+            event.id = id.to_string();
+            event.timestamp = timestamp.to_string();
+            database.insert_event(&event).expect("insert event");
+        }
+
+        let rows = database.skill_chains(None).expect("skill chains");
+
+        assert!(rows.iter().any(|row| {
+            row.left_skill == "repo_search" && row.right_skill == "edit_file" && row.count == 2
+        }));
     }
 }
