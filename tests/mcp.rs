@@ -1,5 +1,5 @@
 use std::{
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, Read, Write},
     process::{Command, Stdio},
 };
 
@@ -42,6 +42,43 @@ fn mcp_stdio_handles_initialize_and_tools_list() {
     let tools_list: Value = serde_json::from_str(&line).expect("parse tools/list");
     let tools = tools_list["result"]["tools"].as_array().expect("tools array");
     assert!(tools.iter().any(|tool| tool["name"] == "skilltrace.record_skill_start"));
+
+    let status = child.wait().expect("wait child");
+    assert!(status.success());
+}
+
+#[test]
+fn mcp_stdio_accepts_notifications_without_response() {
+    let home = temp_home();
+    let binary = env!("CARGO_BIN_EXE_skilltrace");
+    let mut child = Command::new(binary)
+        .arg("mcp")
+        .env("HOME", home.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn skilltrace mcp");
+
+    {
+        let mut stdin = child.stdin.take().expect("stdin");
+        writeln!(stdin, r#"{{"jsonrpc":"2.0","method":"notifications/initialized"}}"#)
+            .expect("write initialized notification");
+        writeln!(stdin, r#"{{"jsonrpc":"2.0","id":4,"method":"initialize"}}"#)
+            .expect("write initialize");
+    }
+
+    let stdout = child.stdout.take().expect("stdout");
+    let mut reader = BufReader::new(stdout);
+    let mut line = String::new();
+
+    reader.read_line(&mut line).expect("read initialize response");
+    let initialize: Value = serde_json::from_str(&line).expect("parse initialize");
+    assert_eq!(initialize["id"], 4);
+    assert_eq!(initialize["result"]["serverInfo"]["name"], "skilltrace");
+
+    let mut remaining = String::new();
+    reader.read_to_string(&mut remaining).expect("read remaining stdout");
+    assert_eq!(remaining, "");
 
     let status = child.wait().expect("wait child");
     assert!(status.success());

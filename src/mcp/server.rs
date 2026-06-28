@@ -28,20 +28,26 @@ pub fn run_stdio() -> Result<()> {
             continue;
         }
 
-        let response = match parse_request(&line) {
-            Ok(request) => {
+        let response = match parse_message(&line) {
+            Ok(McpMessage::Request(request)) => {
                 let request_id = request.id.clone();
                 match handle_request(request) {
-                    Ok(response) => response,
-                    Err(error) => McpResponse::error(request_id, -32603, error.to_string()),
+                    Ok(response) => Some(response),
+                    Err(error) => Some(McpResponse::error(request_id, -32603, error.to_string())),
                 }
             }
-            Err(response) => response,
+            Ok(McpMessage::Notification(notification)) => {
+                handle_notification(notification);
+                None
+            }
+            Err(response) => Some(response),
         };
-        serde_json::to_writer(&mut writer, &response)
-            .context("failed to serialize MCP response")?;
-        writer.write_all(b"\n").context("failed to write MCP response")?;
-        writer.flush().context("failed to flush MCP response")?;
+        if let Some(response) = response {
+            serde_json::to_writer(&mut writer, &response)
+                .context("failed to serialize MCP response")?;
+            writer.write_all(b"\n").context("failed to write MCP response")?;
+            writer.flush().context("failed to flush MCP response")?;
+        }
     }
 
     Ok(())
@@ -106,6 +112,12 @@ pub fn handle_request(request: McpRequest) -> Result<McpResponse> {
         result: Some(result),
         error: None,
     })
+}
+
+fn handle_notification(notification: McpNotification) {
+    let _jsonrpc = notification.jsonrpc;
+    let _method = notification.method;
+    let _params = notification.params;
 }
 
 fn handle_tool_call(call: ToolCallParams) -> std::result::Result<Value, ToolCallError> {
@@ -335,12 +347,18 @@ fn new_session_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
-fn parse_request(line: &str) -> std::result::Result<McpRequest, McpResponse> {
+fn parse_message(line: &str) -> std::result::Result<McpMessage, McpResponse> {
     let value: Value = serde_json::from_str(line).map_err(|error| {
         McpResponse::error(json!(null), -32700, format!("parse error: {error}"))
     })?;
     let id = value.get("id").cloned().unwrap_or_else(|| json!(null));
+    if value.get("id").is_none() {
+        return serde_json::from_value(value)
+            .map(McpMessage::Notification)
+            .map_err(|error| McpResponse::error(id, -32600, format!("invalid request: {error}")));
+    }
     serde_json::from_value(value)
+        .map(McpMessage::Request)
         .map_err(|error| McpResponse::error(id, -32600, format!("invalid request: {error}")))
 }
 
@@ -399,10 +417,23 @@ enum ToolCallError {
     Internal(anyhow::Error),
 }
 
+enum McpMessage {
+    Request(McpRequest),
+    Notification(McpNotification),
+}
+
 #[derive(Debug, Deserialize)]
 pub struct McpRequest {
     pub jsonrpc: String,
     pub id: Value,
+    pub method: String,
+    #[serde(default)]
+    pub params: Option<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct McpNotification {
+    pub jsonrpc: String,
     pub method: String,
     #[serde(default)]
     pub params: Option<Value>,
