@@ -1,5 +1,5 @@
 use std::{
-    fs,
+    env, fs,
     path::{Path, PathBuf},
 };
 
@@ -29,6 +29,10 @@ hash_sensitive_values = true
 [skills]
 definition_file = "skills.toml"
 "#;
+
+pub const ENV_SESSION_ID: &str = "SKILLTRACE_SESSION_ID";
+pub const ENV_AGENT: &str = "SKILLTRACE_AGENT";
+pub const ENV_ADAPTER: &str = "SKILLTRACE_ADAPTER";
 
 #[derive(Debug, Clone)]
 pub struct StoragePaths {
@@ -180,6 +184,18 @@ impl RuntimeState {
             _ => None,
         }
     }
+
+    pub fn preferred_session_id_with_env(&self, env_session_id: Option<&str>) -> Option<String> {
+        env_session_id
+            .filter(|session_id| !session_id.trim().is_empty())
+            .map(str::to_string)
+            .or_else(|| self.preferred_session_id())
+    }
+
+    pub fn preferred_session_id_from_environment(&self) -> Option<String> {
+        let env_session_id = env::var(ENV_SESSION_ID).ok();
+        self.preferred_session_id_with_env(env_session_id.as_deref())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -270,5 +286,16 @@ mod tests {
         state.register_session("session-b");
 
         assert_eq!(state.preferred_session_id(), None);
+    }
+
+    #[test]
+    fn session_id_from_environment_takes_precedence_over_runtime_state() {
+        let mut state = RuntimeState { current_session_id: None, active_session_ids: Vec::new() };
+        state.register_session("session-runtime");
+
+        assert_eq!(
+            state.preferred_session_id_with_env(Some("session-env")),
+            Some("session-env".to_string())
+        );
     }
 }

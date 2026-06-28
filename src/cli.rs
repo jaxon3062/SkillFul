@@ -11,7 +11,10 @@ use chrono::Utc;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::{
-    config::{AppConfig, RuntimeState, SessionRecord, StoragePaths},
+    config::{
+        AppConfig, ENV_ADAPTER, ENV_AGENT, ENV_SESSION_ID, RuntimeState, SessionRecord,
+        StoragePaths,
+    },
     db::Database,
     event::EventRecord,
     export, mcp, privacy, recommend, stats,
@@ -63,10 +66,14 @@ struct WrapArgs {
 
 #[derive(Debug, Clone, ValueEnum)]
 enum EventKind {
+    #[value(alias = "skill_start")]
     SkillStart,
+    #[value(alias = "skill_end")]
     SkillEnd,
     Decision,
+    #[value(alias = "session_start")]
     SessionStart,
+    #[value(alias = "session_end")]
     SessionEnd,
     Error,
 }
@@ -238,7 +245,12 @@ fn wrap_command(args: WrapArgs) -> Result<()> {
         ),
     )?;
 
-    let status = Command::new(&args.command[0]).args(&args.command[1..]).status();
+    let status = Command::new(&args.command[0])
+        .args(&args.command[1..])
+        .env(ENV_SESSION_ID, &session.id)
+        .env(ENV_AGENT, &agent)
+        .env(ENV_ADAPTER, &adapter)
+        .status();
 
     match status {
         Ok(status) => {
@@ -370,7 +382,8 @@ fn event_command(args: EventArgs) -> Result<()> {
     let database = Database::open(&paths.database_path())?.initialize()?;
     let mut state = RuntimeState::load(&paths)?;
 
-    let session_id = match (&args.kind, args.session_id.clone(), state.preferred_session_id()) {
+    let preferred_session_id = state.preferred_session_id_from_environment();
+    let session_id = match (&args.kind, args.session_id.clone(), preferred_session_id) {
         (EventKind::SessionStart, Some(session_id), _) => session_id,
         (EventKind::SessionStart, None, _) => {
             let session = SessionRecord::new(

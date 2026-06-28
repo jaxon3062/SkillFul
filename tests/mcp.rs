@@ -1,4 +1,5 @@
 use std::{
+    fs,
     io::{BufRead, BufReader, Read, Write},
     process::{Command, Stdio},
 };
@@ -118,6 +119,46 @@ fn mcp_stdio_returns_parse_error_and_keeps_running() {
 
     let status = child.wait().expect("wait child");
     assert!(status.success());
+}
+
+#[test]
+fn mcp_stdio_record_skill_start_uses_environment_session_when_session_id_is_absent() {
+    let home = temp_home();
+    let binary = env!("CARGO_BIN_EXE_skilltrace");
+    let mut child = Command::new(binary)
+        .arg("mcp")
+        .env("HOME", home.path())
+        .env("SKILLTRACE_SESSION_ID", "session-env")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn skilltrace mcp");
+
+    {
+        let mut stdin = child.stdin.take().expect("stdin");
+        writeln!(
+            stdin,
+            r#"{{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{{"name":"skilltrace.record_skill_start","arguments":{{"skill":"repo_search"}}}}}}"#
+        )
+        .expect("write record_skill_start");
+    }
+
+    let stdout = child.stdout.take().expect("stdout");
+    let mut reader = BufReader::new(stdout);
+    let mut line = String::new();
+
+    reader.read_line(&mut line).expect("read record response");
+    let response: Value = serde_json::from_str(&line).expect("parse record response");
+    assert_eq!(response["result"]["status"], "recorded");
+
+    let status = child.wait().expect("wait child");
+    assert!(status.success());
+
+    let jsonl = fs::read_to_string(home.path().join(".skilltrace/events.jsonl")).expect("jsonl");
+    let event: Value = serde_json::from_str(jsonl.lines().next().expect("event")).expect("event");
+    assert_eq!(event["event_type"], "skill_start");
+    assert_eq!(event["skill"], "repo_search");
+    assert_eq!(event["session_id"], "session-env");
 }
 
 #[test]

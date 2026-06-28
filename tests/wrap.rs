@@ -34,6 +34,52 @@ fn wrap_omits_raw_command_arguments_by_default() {
 }
 
 #[test]
+fn wrap_exposes_session_identity_to_child_environment() {
+    let home = isolated_home();
+
+    let output = Command::new(binary())
+        .env("HOME", home.path())
+        .args(["wrap", "env"])
+        .output()
+        .expect("run wrap env");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    let session_id = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("SKILLTRACE_SESSION_ID="))
+        .expect("session id env var");
+    assert!(!session_id.is_empty());
+    assert!(stdout.contains("SKILLTRACE_AGENT=env\n"));
+    assert!(stdout.contains("SKILLTRACE_ADAPTER=process-wrapper\n"));
+
+    let events = jsonl_events(&home);
+    assert_eq!(events[0]["session_id"], session_id);
+}
+
+#[test]
+fn event_inside_wrapped_shell_records_into_wrapper_session() {
+    let home = isolated_home();
+    let child_command = format!("{} event skill_end --skill child_tool", binary().display());
+
+    let status = Command::new(binary())
+        .env("HOME", home.path())
+        .args(["wrap", "/bin/sh", "-c", &child_command])
+        .status()
+        .expect("run wrapped shell");
+
+    assert!(status.success());
+
+    let events = jsonl_events(&home);
+    let wrapper_session_id = events[0]["session_id"].as_str().expect("wrapper session");
+    let child_event = events
+        .iter()
+        .find(|event| event["event_type"] == "skill_end" && event["skill"] == "child_tool")
+        .expect("child skill_end event");
+    assert_eq!(child_event["session_id"], wrapper_session_id);
+}
+
+#[test]
 fn wrap_records_successful_command_boundaries() {
     let home = isolated_home();
 
