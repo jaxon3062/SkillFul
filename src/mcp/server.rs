@@ -3,7 +3,7 @@ use std::{
     path::Path,
 };
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -190,8 +190,7 @@ fn handle_tool_call(call: ToolCallParams) -> std::result::Result<Value, ToolCall
         "skilltrace.record_skill_end" => {
             let args: RecordSkillEndArgs = serde_json::from_value(call.arguments)
                 .map_err(|error| ToolCallError::InvalidParams(error.to_string()))?;
-            let completed =
-                complete_skill_event(&database, &args).map_err(ToolCallError::Internal)?;
+            let completed = complete_skill_event(&database, &args)?;
             persist_event(&paths, &database, &config.privacy, &completed)
                 .map_err(ToolCallError::Internal)?;
             Ok(json!({
@@ -345,10 +344,23 @@ fn parse_request(line: &str) -> std::result::Result<McpRequest, McpResponse> {
         .map_err(|error| McpResponse::error(id, -32600, format!("invalid request: {error}")))
 }
 
-fn complete_skill_event(database: &Database, args: &RecordSkillEndArgs) -> Result<EventRecord> {
-    let start_event = database
-        .event_by_id(&args.event_id)?
-        .ok_or_else(|| anyhow!("event {} not found", args.event_id))?;
+fn complete_skill_event(
+    database: &Database,
+    args: &RecordSkillEndArgs,
+) -> std::result::Result<EventRecord, ToolCallError> {
+    let start_event =
+        database.event_by_id(&args.event_id).map_err(ToolCallError::Internal)?.ok_or_else(
+            || ToolCallError::InvalidParams(format!("event {} not found", args.event_id)),
+        )?;
+    if start_event.event_type != "skill_start" {
+        return Err(ToolCallError::InvalidParams(format!(
+            "event {} is not a skill_start",
+            args.event_id
+        )));
+    }
+    if start_event.skill.is_none() {
+        return Err(ToolCallError::InvalidParams(format!("event {} has no skill", args.event_id)));
+    }
     let ended_at = Utc::now().to_rfc3339();
     let duration_ms =
         chrono::DateTime::parse_from_rfc3339(&start_event.timestamp).ok().and_then(|started_at| {
@@ -642,6 +654,87 @@ mod tests {
             assert_eq!(jsonl.lines().count(), 2);
             assert!(jsonl.contains("\"event_type\":\"skill_start\""));
             assert!(jsonl.contains("\"event_type\":\"skill_end\""));
+        });
+    }
+
+    #[test]
+    fn record_skill_end_rejects_non_skill_start_source_event() {
+        with_temp_home(|| {
+            let decision = handle_request(McpRequest {
+                jsonrpc: "2.0".to_string(),
+                id: json!(1),
+                method: "tools/call".to_string(),
+                params: Some(json!({
+                    "name": "skilltrace.record_event",
+                    "arguments": {
+                        "event_type": "decision",
+                        "session_id": "session-invalid-end",
+                        "skill": "repo_search"
+                    }
+                })),
+            })
+            .expect("record_event");
+
+            let event_id = decision.result.expect("result")["event_id"]
+                .as_str()
+                .expect("event id")
+                .to_string();
+            let end = handle_request(McpRequest {
+                jsonrpc: "2.0".to_string(),
+                id: json!(2),
+                method: "tools/call".to_string(),
+                params: Some(json!({
+                    "name": "skilltrace.record_skill_end",
+                    "arguments": {
+                        "event_id": event_id,
+                        "success": true
+                    }
+                })),
+            })
+            .expect("record_skill_end response");
+
+            let error = end.error.expect("error");
+            assert_eq!(error.code, -32602);
+        });
+    }
+
+    #[test]
+    fn record_skill_end_rejects_skill_start_without_skill() {
+        with_temp_home(|| {
+            let start_without_skill = handle_request(McpRequest {
+                jsonrpc: "2.0".to_string(),
+                id: json!(1),
+                method: "tools/call".to_string(),
+                params: Some(json!({
+                    "name": "skilltrace.record_event",
+                    "arguments": {
+                        "event_type": "skill_start",
+                        "session_id": "session-invalid-end"
+                    }
+                })),
+            })
+            .expect("record_event");
+
+            let event_id = start_without_skill.result.expect("result")["event_id"]
+                .as_str()
+                .expect("event id")
+                .to_string();
+            let end = handle_request(McpRequest {
+                jsonrpc: "2.0".to_string(),
+                id: json!(2),
+                method: "tools/call".to_string(),
+                params: Some(json!({
+                    "name": "skilltrace.record_skill_end",
+                    "arguments": {
+                        "event_id": event_id,
+                        "success": true
+                    }
+                })),
+            })
+            .expect("record_skill_end response");
+
+            let error = end.error.expect("error");
+            assert_eq!(error.code, -32602);
         });
     }
 
