@@ -212,6 +212,32 @@ fn wrap_command(args: WrapArgs) -> Result<()> {
         ),
     )?;
 
+    record_event(
+        &database,
+        &paths,
+        &config.privacy,
+        EventRecord::new(
+            "command_start".to_string(),
+            session.id.clone(),
+            None,
+            Some("wrapped_command".to_string()),
+            agent.clone(),
+            adapter.clone(),
+            None,
+            None,
+            None,
+            0,
+            wrap_input_summary(&args.command, config.privacy.capture_raw_prompts),
+            None,
+            None,
+            None,
+            Vec::new(),
+            None,
+            None,
+            None,
+        ),
+    )?;
+
     let status = Command::new(&args.command[0]).args(&args.command[1..]).status();
 
     match status {
@@ -222,6 +248,32 @@ fn wrap_command(args: WrapArgs) -> Result<()> {
                 None => "child terminated by signal".to_string(),
             };
             let error = if success { None } else { Some(output_summary.clone()) };
+
+            record_event(
+                &database,
+                &paths,
+                &config.privacy,
+                EventRecord::new(
+                    "command_end".to_string(),
+                    session.id.clone(),
+                    None,
+                    Some("wrapped_command".to_string()),
+                    agent.clone(),
+                    adapter.clone(),
+                    Some(success),
+                    None,
+                    error.clone(),
+                    0,
+                    None,
+                    Some(output_summary.clone()),
+                    None,
+                    None,
+                    Vec::new(),
+                    None,
+                    None,
+                    None,
+                ),
+            )?;
 
             record_event(
                 &database,
