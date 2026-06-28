@@ -169,7 +169,7 @@ fn handle_tool_call(call: ToolCallParams) -> std::result::Result<Value, ToolCall
                 .map_err(|error| ToolCallError::InvalidParams(error.to_string()))?;
             let session_id = args
                 .session_id
-                .or_else(|| state.preferred_session_id())
+                .or_else(|| state.preferred_session_id_from_environment())
                 .unwrap_or_else(new_session_id);
             let agent = args.agent.unwrap_or_else(|| "codex".to_string());
             let adapter = args.adapter.unwrap_or_else(|| "mcp".to_string());
@@ -805,6 +805,56 @@ mod tests {
                 .expect("init db");
             let event = database.event_by_id(&event_id).expect("event").expect("existing");
             assert_eq!(event.session_id, "session-active");
+        });
+    }
+
+    #[test]
+    fn skill_start_without_session_id_prefers_environment_session_over_runtime_state() {
+        with_temp_home(|| {
+            let paths = StoragePaths::discover().expect("paths");
+            paths.ensure_dirs().expect("ensure dirs");
+            RuntimeState {
+                current_session_id: Some("session-runtime".to_string()),
+                active_session_ids: vec!["session-runtime".to_string()],
+            }
+            .save(&paths)
+            .expect("save state");
+
+            let previous_session = env::var_os("SKILLTRACE_SESSION_ID");
+            unsafe {
+                env::set_var("SKILLTRACE_SESSION_ID", "session-env");
+            }
+
+            let start = handle_request(McpRequest {
+                jsonrpc: "2.0".to_string(),
+                id: json!(1),
+                method: "tools/call".to_string(),
+                params: Some(json!({
+                    "name": "skilltrace.record_skill_start",
+                    "arguments": {
+                        "skill": "repo_search"
+                    }
+                })),
+            })
+            .expect("record_skill_start");
+
+            match previous_session {
+                Some(value) => unsafe {
+                    env::set_var("SKILLTRACE_SESSION_ID", value);
+                },
+                None => unsafe {
+                    env::remove_var("SKILLTRACE_SESSION_ID");
+                },
+            }
+
+            let event_id =
+                start.result.expect("result")["event_id"].as_str().expect("event id").to_string();
+            let database = Database::open(&paths.database_path())
+                .expect("open db")
+                .initialize()
+                .expect("init db");
+            let event = database.event_by_id(&event_id).expect("event").expect("existing");
+            assert_eq!(event.session_id, "session-env");
         });
     }
 
