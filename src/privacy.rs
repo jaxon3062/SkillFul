@@ -21,20 +21,9 @@ fn sanitize_text(value: Option<String>) -> Option<String> {
 }
 
 fn sanitize_inline(value: &str) -> String {
-    let mut sanitized = Vec::new();
-    let mut tokens = value.split_whitespace().peekable();
-
-    while let Some(token) = tokens.next() {
-        sanitized.push(sanitize_token(token));
-
-        if token.eq_ignore_ascii_case("Bearer") {
-            if let Some(value) = tokens.next() {
-                sanitized.push(sanitize_bearer_value(value));
-            }
-        }
-    }
-
-    sanitized.join(" ")
+    let value = sanitize_bearer_segments(value);
+    let value = sanitize_key_value_segments(&value).unwrap_or(value);
+    sanitize_standalone_tokens(&value)
 }
 
 fn sanitize_token(token: &str) -> String {
@@ -47,8 +36,8 @@ fn sanitize_token(token: &str) -> String {
         return sanitized;
     }
 
-    if let Some(rest) = token.strip_prefix("Bearer ") {
-        return format!("Bearer {}", hash_value(rest));
+    if looks_like_dangling_sensitive_key(token) {
+        return token.to_string();
     }
 
     if looks_sensitive_token(trimmed) {
@@ -58,13 +47,88 @@ fn sanitize_token(token: &str) -> String {
     token.to_string()
 }
 
-fn sanitize_bearer_value(token: &str) -> String {
-    let trimmed = token.trim_matches(|ch: char| matches!(ch, '"' | '\'' | '(' | ')' | '[' | ']'));
-    if trimmed.starts_with("sha256:") {
-        return token.to_string();
+fn sanitize_standalone_tokens(value: &str) -> String {
+    value.split_whitespace().map(sanitize_token).collect::<Vec<_>>().join(" ")
+}
+
+fn sanitize_bearer_segments(value: &str) -> String {
+    let mut output = String::new();
+    let mut last_copied = 0;
+    let mut index = 0;
+    let mut changed = false;
+
+    while index < value.len() {
+        if let Some(match_span) = bearer_at(value, index) {
+            if !match_span.already_hashed {
+                output.push_str(&value[last_copied..match_span.value_start]);
+                output.push_str(&hash_value(&value[match_span.value_start..match_span.value_end]));
+                last_copied = match_span.value_end;
+                changed = true;
+            }
+            index = match_span.value_end;
+        } else {
+            index += next_char_len(value, index);
+        }
     }
 
-    token.replacen(trimmed, &hash_value(trimmed), 1)
+    if changed {
+        output.push_str(&value[last_copied..]);
+        output
+    } else {
+        value.to_string()
+    }
+}
+
+struct BearerMatch {
+    value_start: usize,
+    value_end: usize,
+    already_hashed: bool,
+}
+
+fn bearer_at(value: &str, start: usize) -> Option<BearerMatch> {
+    let marker = "Bearer";
+    if value.len() < start + marker.len()
+        || !value[start..start + marker.len()].eq_ignore_ascii_case(marker)
+    {
+        return None;
+    }
+    if start > 0 && is_token_char(value[..start].chars().next_back()?) {
+        return None;
+    }
+
+    let mut value_start = start + marker.len();
+    let mut saw_whitespace = false;
+    while value_start < value.len() {
+        let ch = value[value_start..].chars().next()?;
+        if !ch.is_whitespace() {
+            break;
+        }
+        saw_whitespace = true;
+        value_start += ch.len_utf8();
+    }
+    if !saw_whitespace {
+        return None;
+    }
+
+    let value_quote = quote_at(value, value_start);
+    if let Some(quote) = value_quote {
+        value_start += quote.len_utf8();
+    }
+
+    let value_end = read_value_end(value, value_start, value_quote);
+    if value_end == value_start {
+        return None;
+    }
+
+    Some(BearerMatch {
+        value_start,
+        value_end,
+        already_hashed: value[value_start..value_end].starts_with("sha256:"),
+    })
+}
+
+fn is_token_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-')
 }
 
 fn sanitize_key_value_segments(token: &str) -> Option<String> {
@@ -121,6 +185,7 @@ fn sensitive_pair_at(token: &str, start: usize) -> Option<SensitivePairMatch> {
     }
 
     let delimiter_index = key_quote.map_or(key_end, |quote| key_end + quote.len_utf8());
+    let delimiter_index = skip_whitespace(token, delimiter_index);
     let delimiter = token[delimiter_index..].chars().next()?;
     if !matches!(delimiter, '=' | ':') {
         return None;
@@ -130,7 +195,7 @@ fn sensitive_pair_at(token: &str, start: usize) -> Option<SensitivePairMatch> {
         return None;
     }
 
-    let mut value_start = delimiter_index + delimiter.len_utf8();
+    let mut value_start = skip_whitespace(token, delimiter_index + delimiter.len_utf8());
     let value_quote = quote_at(token, value_start);
     if let Some(quote) = value_quote {
         value_start += quote.len_utf8();
@@ -171,6 +236,18 @@ fn read_value_end(token: &str, start: usize, value_quote: Option<char>) -> usize
     end
 }
 
+fn skip_whitespace(token: &str, start: usize) -> usize {
+    let mut index = start;
+    while index < token.len() {
+        let ch = token[index..].chars().next().expect("index is in bounds");
+        if !ch.is_whitespace() {
+            break;
+        }
+        index += ch.len_utf8();
+    }
+    index
+}
+
 fn quote_at(token: &str, index: usize) -> Option<char> {
     token[index..].chars().next().filter(|ch| matches!(ch, '"' | '\''))
 }
@@ -184,6 +261,13 @@ fn looks_sensitive_key(key: &str) -> bool {
     ["token", "secret", "password", "api_key", "apikey", "key", "bearer"]
         .iter()
         .any(|candidate| lowered.contains(candidate))
+}
+
+fn looks_like_dangling_sensitive_key(token: &str) -> bool {
+    let trimmed = token.trim_matches(|ch: char| matches!(ch, '"' | '\'' | '(' | ')' | '[' | ']'));
+    let key = trimmed.trim_end_matches([':', '=']);
+    key.len() < trimmed.len()
+        && looks_sensitive_key(key.trim_matches(|ch| matches!(ch, '"' | '\'')))
 }
 
 fn looks_sensitive_token(token: &str) -> bool {
@@ -308,6 +392,39 @@ mod tests {
             value.contains(r#""secret":"sha256:"#)
                 && value.contains(r#""safe":"visible""#)
                 && !value.contains("metadata-secret")
+        }));
+    }
+
+    #[test]
+    fn sanitize_event_hashes_spaced_log_secret_value() {
+        let mut event = EventRecord::new(
+            "decision".to_string(),
+            "session-1".to_string(),
+            None,
+            None,
+            "codex".to_string(),
+            "manual".to_string(),
+            None,
+            None,
+            None,
+            0,
+            None,
+            Some(r#"prefix "token": "abc123secret" suffix"#.to_string()),
+            None,
+            None,
+            Vec::new(),
+            None,
+            None,
+            None,
+        );
+
+        sanitize_event(&mut event, &privacy(true));
+
+        assert!(event.output_summary.as_deref().is_some_and(|value| {
+            value.contains(r#""token": "sha256:"#)
+                && value.contains("prefix")
+                && value.contains("suffix")
+                && !value.contains("abc123secret")
         }));
     }
 
