@@ -82,3 +82,40 @@ fn mcp_stdio_returns_parse_error_and_keeps_running() {
     let status = child.wait().expect("wait child");
     assert!(status.success());
 }
+
+#[test]
+fn mcp_stdio_internal_tool_error_preserves_request_id() {
+    let home = temp_home();
+    let cwd_without_skills = tempfile::tempdir().expect("cwd tempdir");
+    let binary = env!("CARGO_BIN_EXE_skilltrace");
+    let mut child = Command::new(binary)
+        .arg("mcp")
+        .env("HOME", home.path())
+        .current_dir(cwd_without_skills.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn skilltrace mcp");
+
+    {
+        let mut stdin = child.stdin.take().expect("stdin");
+        writeln!(
+            stdin,
+            r#"{{"jsonrpc":"2.0","id":123,"method":"tools/call","params":{{"name":"skilltrace.get_recommendations","arguments":{{"cwd":{}}}}}}}"#,
+            serde_json::to_string(cwd_without_skills.path()).expect("serialize cwd")
+        )
+        .expect("write get_recommendations");
+    }
+
+    let stdout = child.stdout.take().expect("stdout");
+    let mut reader = BufReader::new(stdout);
+    let mut line = String::new();
+
+    reader.read_line(&mut line).expect("read error response");
+    let response: Value = serde_json::from_str(&line).expect("parse error response");
+    assert_eq!(response["id"], 123);
+    assert_eq!(response["error"]["code"], -32603);
+
+    let status = child.wait().expect("wait child");
+    assert!(status.success());
+}
