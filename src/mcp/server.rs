@@ -576,6 +576,14 @@ mod tests {
             }
             Self { key, previous_value }
         }
+
+        fn remove(key: &'static str) -> Self {
+            let previous_value = env::var_os(key);
+            unsafe {
+                env::remove_var(key);
+            }
+            Self { key, previous_value }
+        }
     }
 
     impl Drop for EnvVarGuard {
@@ -793,6 +801,7 @@ mod tests {
     #[test]
     fn skill_start_without_session_id_uses_single_active_runtime_session() {
         with_temp_home(|| {
+            let _session_guard = EnvVarGuard::remove("SKILLTRACE_SESSION_ID");
             let paths = StoragePaths::discover().expect("paths");
             paths.ensure_dirs().expect("ensure dirs");
             RuntimeState {
