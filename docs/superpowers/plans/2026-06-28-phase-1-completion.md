@@ -1,10 +1,12 @@
-# Phase 1 Completion Implementation Plan
+# Phase 1 Completion Result
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Status:** Complete. This plan was implemented with repo-local git worktrees, subagent implementation, review gates, merge gates, and cleanup after each milestone.
 
 **Goal:** Finish the remaining Codex MVP Phase 1 milestones for richer workflow tracing, chain-aware recommendations, session correlation, and stronger privacy defaults.
 
-**Architecture:** Keep `skilltrace` local-first and append-only. Add value through explicit event records, SQLite-backed reports, and MCP/CLI-visible outputs without introducing raw prompt/output capture by default.
+**Result:** Phase 1 is complete on `main`.
+
+**Architecture:** `skilltrace` remains local-first, append-only by default, CLI-first, and MCP-compatible. The completed work adds more useful explicit event capture, SQLite-backed chain analysis, stronger summary-field sanitization, and deterministic session correlation without enabling raw prompt or raw output capture by default.
 
 **Tech Stack:** Rust 2024, `clap`, `rusqlite`, `serde`, `serde_json`, `toml`, `chrono`, `uuid`, `sha2`, integration tests via `cargo test`.
 
@@ -20,166 +22,114 @@
 - Each milestone must be implemented in a repo-local git worktree under `.worktrees/`.
 - Merge to `main` only after implementation review and verification show no core feature conflict.
 
----
+## Completion Summary
+
+All four Phase 1 completion milestones were implemented and merged:
+
+- Stronger privacy sanitization.
+- Chain-aware recommendations.
+- Wrapper command boundary events.
+- Wrapped/MCP session correlation.
+
+All milestone worktrees and local `phase1/*` branches were cleaned after merge. Final verification passed with:
+
+```bash
+cargo test
+SKILLTRACE_SESSION_ID=ambient-session cargo test mcp::server::tests::skill_start_without_session_id_uses_single_active_runtime_session
+```
+
+## Implemented Milestones
 
 ### Task 1: Stronger Privacy Sanitization
 
-**Files:**
-- Modify: `src/privacy.rs`
-- Test: `tests/privacy.rs`
+**Status:** Complete.
 
-**Interfaces:**
-- Consumes: `privacy::sanitize_event(&mut EventRecord, &PrivacyConfig)`
-- Produces: stronger sanitization for summary fields, error, planner reason, alternatives, and metadata JSON without changing public CLI arguments.
+**Merged commits:**
 
-- [ ] **Step 1: Write failing tests**
+- `60ffc84` Strengthen privacy sanitization
+- `8b4d200` Fix spaced privacy secret sanitization
+- `197bc56` Merge stronger privacy sanitization
 
-Add integration tests proving default hashing removes these sensitive forms from stdout and JSONL:
+**Files changed:**
 
-```rust
-#[test]
-fn event_hashes_url_query_secrets_by_default() {
-    // `--input-summary "GET https://example.test/path?token=super-secret-token&safe=value"`
-    // Assert stdout and JSONL do not contain `super-secret-token`.
-    // Assert JSONL still contains `token=sha256:`.
-}
+- `src/privacy.rs`
+- `tests/privacy.rs`
 
-#[test]
-fn event_hashes_json_like_secret_fields_by_default() {
-    // `--output-summary "{\"api_key\":\"abc123secret\",\"safe\":\"visible\"}"`
-    // Assert stdout and JSONL do not contain `abc123secret`.
-    // Assert JSONL still contains `api_key`.
-}
-```
+**Implemented behavior:**
 
-- [ ] **Step 2: Verify the tests fail**
+- Sanitizes sensitive values in summary-like event fields before persistence and output.
+- Covers compact key/value forms such as `token=secret`, `token:secret`, `token:"secret"`, and `"token":"secret"`.
+- Covers URL query parameters such as `?token=secret&safe=value`.
+- Covers bearer forms such as `Authorization: Bearer secret`.
+- Covers spaced JSON/log forms such as `{"api_key": "secret"}` and `prefix "token": "secret" suffix`.
+- Sanitizes `metadata_json` in addition to input/output summaries, errors, planner reasons, and alternatives.
+- Preserves non-sensitive values where practical.
+- Preserves the existing `sha256:<16 hex chars>` hash shape.
+- Keeps hash-disabled behavior unchanged.
 
-Run: `cargo test privacy`
+**Verification added:**
 
-Expected: the new tests fail because URL query secrets and JSON-like secret values are not fully sanitized.
+- `privacy_event_hashes_url_query_secrets_by_default`
+- `privacy_event_hashes_json_like_secret_fields_by_default`
+- `privacy_event_hashes_spaced_json_like_secret_fields_by_default`
+- `sanitize_event_hashes_sensitive_key_value_variants`
+- `sanitize_event_hashes_spaced_log_secret_value`
 
-- [ ] **Step 3: Implement minimal sanitizer improvements**
-
-Update `src/privacy.rs` so sensitive key/value detection handles:
-
-```text
-token=secret
-token:secret
-token:"secret"
-"token":"secret"
-https://host/path?token=secret&safe=value
-Authorization: Bearer secret
-```
-
-Do not add dependencies. Preserve existing `sha256:<16 hex chars>` output shape.
-
-- [ ] **Step 4: Verify focused tests pass**
-
-Run: `cargo test privacy`
-
-Expected: all privacy tests pass.
-
-- [ ] **Step 5: Verify broader suite**
-
-Run: `cargo test`
-
-Expected: all tests pass.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add src/privacy.rs tests/privacy.rs
-git commit -m "Strengthen privacy sanitization"
-```
+**Review outcome:** Initial review found a high-severity spaced JSON/log leak. The fix was implemented, re-reviewed, and accepted before merge.
 
 ### Task 2: Chain-Aware Recommendations
 
-**Files:**
-- Modify: `src/db.rs`
-- Modify: `src/recommend.rs`
-- Test: unit tests in `src/recommend.rs` and `src/db.rs`
+**Status:** Complete.
 
-**Interfaces:**
-- Consumes: existing event ordering by `session_id`, `timestamp`, and `id`.
-- Produces: a new chain/co-occurrence query result type and recommendations that mention repeated adjacent skill chains.
+**Merged commits:**
 
-- [ ] **Step 1: Write failing tests**
+- `c96e83a` Add chain-aware recommendations
+- `8acebdf` Merge chain-aware recommendations
 
-Add tests showing:
+**Files changed:**
 
-```rust
-// db.rs
-// Given session-1 has skill_end: repo_search, edit_file, run_tests
-// and session-2 has skill_end: repo_search, edit_file
-// database.skill_chains(None) returns repo_search -> edit_file with count 2.
+- `src/db.rs`
+- `src/recommend.rs`
+- `src/cli.rs`
+- `src/mcp/server.rs`
 
-// recommend.rs
-// Given chain rows for repo_search -> edit_file repeated at least twice,
-// build_recommendations includes a line containing
-// "Review chain `repo_search` -> `edit_file`".
-```
+**Implemented behavior:**
 
-- [ ] **Step 2: Verify tests fail**
-
-Run: `cargo test recommend`
-
-Expected: chain recommendation test fails before implementation.
-
-Run: `cargo test db`
-
-Expected: chain query test fails before implementation.
-
-- [ ] **Step 3: Implement storage query**
-
-Add a `SkillChainRow` struct and `Database::skill_chains(agent: Option<&str>) -> Result<Vec<SkillChainRow>>`.
-
-The query should consider only `event_type = 'skill_end'` rows with non-null `skill`, ordered per session by `timestamp ASC, id ASC`, and count adjacent pairs.
-
-- [ ] **Step 4: Implement recommendation heuristic**
-
-Extend `recommend::build_recommendations` to accept chain rows. Recommend reviewing a chain when the same adjacent pair appears at least twice.
-
-Message shape:
+- Added `SkillChainRow`.
+- Added `Database::skill_chains(agent: Option<&str>) -> Result<Vec<SkillChainRow>>`.
+- Counts adjacent `skill_end` pairs with non-null skills, ordered by `timestamp ASC, id ASC` within each session.
+- Adds recommendation lines for repeated adjacent chains:
 
 ```text
 Review chain `repo_search` -> `edit_file`. Reason: observed as an adjacent skill sequence 2 times.
 ```
 
-- [ ] **Step 5: Wire CLI and MCP recommendation callers**
+- Wires chain rows into both CLI `recommend` and MCP `skilltrace.get_recommendations`.
 
-Update `recommend_command()` and `skilltrace.get_recommendations` to pass chain rows.
+**Verification added:**
 
-- [ ] **Step 6: Verify**
+- `skill_chains_count_adjacent_skill_end_pairs_across_sessions`
+- `repeated_adjacent_skill_chain_triggers_review_recommendation`
 
-Run:
-
-```bash
-cargo test recommend
-cargo test db
-cargo test mcp
-cargo test
-```
-
-- [ ] **Step 7: Commit**
-
-```bash
-git add src/db.rs src/recommend.rs src/cli.rs src/mcp/server.rs
-git commit -m "Add chain-aware recommendations"
-```
+**Review outcome:** Reviewed cleanly. Residual risks were limited to additional optional coverage for same-timestamp ties, agent filters, and MCP response assertions.
 
 ### Task 3: Wrapper Command Boundary Events
 
-**Files:**
-- Modify: `src/cli.rs`
-- Test: `tests/wrap.rs`
+**Status:** Complete.
 
-**Interfaces:**
-- Consumes: existing `wrap` session lifecycle.
-- Produces: explicit child command boundary events inside the wrapper session without raw command arguments by default.
+**Merged commits:**
 
-- [ ] **Step 1: Write failing tests**
+- `05147aa` Record wrapper command boundaries
+- `67ce088` Merge wrapper command boundaries
 
-Add a wrap integration test proving a successful wrapped command records these event types in JSONL:
+**Files changed:**
+
+- `src/cli.rs`
+- `tests/wrap.rs`
+
+**Implemented behavior:**
+
+- `skilltrace wrap <command>` now records explicit command boundary events:
 
 ```text
 session_start
@@ -188,86 +138,42 @@ command_end
 session_end
 ```
 
-Assert:
+- `command_start.skill` and `command_end.skill` are `wrapped_command`.
+- `command_end.success` reflects the child process result.
+- Child exit status passthrough remains intact.
+- Command start uses privacy-aware `wrap_input_summary`.
+- Command end records exit status or signal information without raw command arguments.
+- SQLite and JSONL stay aligned through the existing event recording path.
 
-```text
-command_start.skill == "wrapped_command"
-command_end.skill == "wrapped_command"
-command_end.success == true
-raw command arguments remain absent by default
-```
+**Verification added:**
 
-Add a failure test proving `command_end.success == false` and the wrapper still returns the child exit status.
+- `wrap_records_successful_command_boundaries`
+- `wrap_records_failed_command_boundary_and_returns_child_status`
 
-- [ ] **Step 2: Verify tests fail**
-
-Run: `cargo test wrap`
-
-Expected: new command boundary assertions fail because only session-level events exist.
-
-- [ ] **Step 3: Implement boundary events**
-
-In `wrap_command`, record:
-
-```text
-command_start
-command_end
-```
-
-Use `skill = Some("wrapped_command")`. The command start summary must use the existing privacy-aware `wrap_input_summary`. The command end summary must include only exit status or signal information, not raw command arguments.
-
-- [ ] **Step 4: Verify**
-
-Run:
-
-```bash
-cargo test wrap
-cargo test
-```
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add src/cli.rs tests/wrap.rs
-git commit -m "Record wrapper command boundaries"
-```
+**Review outcome:** Reviewed cleanly. Spawn failure still records `session_start`, `command_start`, and `error` rather than `command_end`; this remains outside the completed milestone scope.
 
 ### Task 4: Session Correlation for Wrapped and MCP Workflows
 
-**Files:**
-- Modify: `src/cli.rs`
-- Modify: `src/mcp/server.rs`
-- Modify: `src/config.rs`
-- Test: `tests/wrap.rs`, `tests/mcp.rs`, and unit tests in `src/config.rs`
+**Status:** Complete.
 
-**Interfaces:**
-- Consumes: `RuntimeState::preferred_session_id()` and wrapper sessions.
-- Produces: deterministic session correlation when a wrapped child invokes `skilltrace event` or MCP tools.
+**Merged commits:**
 
-- [ ] **Step 1: Write failing tests**
+- `3ecf806` Correlate wrapped child events
+- `18ee387` Isolate MCP tests from shared environment
+- `33444a9` Clear ambient session in MCP fallback test
+- `f4c5ea4` Merge wrapped session correlation
 
-Add tests proving:
+**Files changed:**
 
-```text
-`skilltrace wrap env` exposes SKILLTRACE_SESSION_ID to the child.
-`skilltrace event skill_end --skill child_tool` inside a wrapped shell records into the wrapper session without requiring --session-id.
-MCP record_skill_start without a session_id uses SKILLTRACE_SESSION_ID when present.
-```
+- `src/cli.rs`
+- `src/config.rs`
+- `src/mcp/server.rs`
+- `tests/wrap.rs`
+- `tests/mcp.rs`
 
-- [ ] **Step 2: Verify tests fail**
+**Implemented behavior:**
 
-Run:
-
-```bash
-cargo test wrap
-cargo test mcp
-```
-
-Expected: the environment correlation assertions fail before implementation.
-
-- [ ] **Step 3: Implement wrapper environment export**
-
-When spawning the wrapped child, set:
+- Wrapped child processes receive:
 
 ```text
 SKILLTRACE_SESSION_ID=<session.id>
@@ -275,27 +181,49 @@ SKILLTRACE_AGENT=<agent>
 SKILLTRACE_ADAPTER=<adapter>
 ```
 
-- [ ] **Step 4: Implement CLI event fallback**
+- `skilltrace event` without `--session-id` prefers `SKILLTRACE_SESSION_ID` over runtime state.
+- MCP `record_skill_start` without `session_id` prefers `SKILLTRACE_SESSION_ID` over runtime state.
+- Wrapped shell commands can record child events into the wrapper session.
+- MCP tests now isolate process environment mutations with scoped guards.
 
-When `skilltrace event` has no `--session-id`, prefer `SKILLTRACE_SESSION_ID` over runtime state if the environment variable is present.
+**Verification added:**
 
-- [ ] **Step 5: Implement MCP fallback**
+- `wrap_exposes_session_identity_to_child_environment`
+- `event_inside_wrapped_shell_records_into_wrapper_session`
+- `mcp_stdio_record_skill_start_uses_environment_session_when_session_id_is_absent`
+- `session_id_from_environment_takes_precedence_over_runtime_state`
+- `skill_start_without_session_id_prefers_environment_session_over_runtime_state`
 
-When `record_skill_start` has no `session_id`, prefer `SKILLTRACE_SESSION_ID` over runtime state if the environment variable is present.
+**Review outcome:** Review found a minor test isolation issue involving ambient `SKILLTRACE_SESSION_ID`. The fix was implemented and verified before merge.
 
-- [ ] **Step 6: Verify**
+## Current Phase 1 State
 
-Run:
+Phase 1 now includes:
 
-```bash
-cargo test wrap
-cargo test mcp
-cargo test
-```
+- CLI scaffold.
+- SQLite schema bootstrap.
+- JSONL mirror/export.
+- local initialization via `skilltrace init`.
+- manual event recording via `skilltrace event`.
+- process wrapper session lifecycle and command boundary events.
+- wrapper child session correlation through environment variables.
+- stdio MCP server and tool handlers.
+- MCP protocol-shaped error handling.
+- data-backed `stats`, `timeline`, `failures`, `unused`, and `recommend`.
+- overlap/inactivity recommendation heuristics.
+- adjacent chain recommendation heuristics.
+- configured skill definition resolution.
+- summary-field sensitive value hashing/redaction, including common key/value, bearer, query-string, compact JSON, and spaced JSON/log forms.
+- test coverage for wrapper privacy/exit/boundary/correlation behavior, skill-definition resolution, MCP request handling, session correlation, recommendation chains, and privacy hashing.
 
-- [ ] **Step 7: Commit**
+## Remaining Backlog After Phase 1
 
-```bash
-git add src/cli.rs src/mcp/server.rs src/config.rs tests/wrap.rs tests/mcp.rs
-git commit -m "Correlate wrapped child events"
-```
+These are not Phase 1 blockers:
+
+- First-class session leases/locks for concurrent long-lived workflows.
+- Richer internal tool-call capture beyond explicit wrapper command boundaries and MCP/manual events.
+- More advanced chain and time-windowed recommendation heuristics.
+- Stronger parsing for future raw capture paths if raw capture is ever enabled.
+- Non-stdio MCP transports.
+- Adapters beyond the Codex-first baseline.
+- OpenTelemetry export/serve functionality.

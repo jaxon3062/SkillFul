@@ -23,7 +23,7 @@ The product direction is:
 
 ## Current Stage
 
-The project is in the **Codex MVP implementation stage**.
+The project is in the **post-Phase-1 Codex MVP stabilization stage**.
 
 Implemented today:
 
@@ -33,17 +33,21 @@ Implemented today:
 - manual event recording via `skilltrace event`
 - reporting via `stats`, `timeline`, `failures`, `unused`, and `recommend`
 - process wrapper session tracing via `skilltrace wrap <command>`
+- explicit wrapper command boundary events via `command_start` and `command_end`
+- wrapped child session correlation through `SKILLTRACE_SESSION_ID`, `SKILLTRACE_AGENT`, and `SKILLTRACE_ADAPTER`
 - stdio MCP server with working tool handlers
+- MCP `record_skill_start` correlation through `SKILLTRACE_SESSION_ID`
 - review-driven correctness/privacy fixes
-- recommendation heuristics for overlap/co-occurrence and 30-day inactivity
-- hashing/redaction for sensitive summary fields before persistence/output
-- test coverage for wrapper privacy/exit behavior, skill-definition resolution, MCP request handling, and privacy hashing
+- recommendation heuristics for overlap/co-occurrence, adjacent skill chains, and 30-day inactivity
+- hashing/redaction for sensitive summary-like fields before persistence/output, including common key/value, bearer, query-string, compact JSON, and spaced JSON/log forms
+- test coverage for wrapper privacy/exit/boundary/correlation behavior, skill-definition resolution, MCP request handling, session correlation, recommendation chains, and privacy hashing
 
 Not implemented yet:
 
-- rich wrapper boundary detection for commands/tool calls inside wrapped processes
-- stronger secret detection/redaction beyond the current summary-field hashing
-- deeper recommendation heuristics such as multi-skill chain analysis and time-windowed correlations beyond the current overlap/inactivity rules
+- first-class session leases/locks for concurrent long-lived workflows
+- rich internal tool-call capture beyond explicit wrapper command boundaries and MCP/manual events
+- deeper recommendation heuristics such as longer multi-skill chain analysis and time-windowed correlations
+- stronger parsing/redaction for future raw capture paths if raw capture is ever enabled
 - non-stdio MCP transports
 - adapters beyond the current Codex-first baseline
 - OpenTelemetry export/serve functionality
@@ -58,18 +62,18 @@ Completed:
 - SQLite schema bootstrap
 - JSONL mirror
 - process wrapper session lifecycle
+- wrapper command boundary events
+- wrapped child session correlation
 - MCP stdio server
+- MCP event/session correlation for `record_skill_start`
 - data-backed stats/failures/timeline/recommend
 - review-driven correctness/privacy fixes
 - overlap/inactivity recommendation heuristics
-- summary-field sensitive value hashing
+- adjacent chain recommendation heuristics
+- summary-field sensitive value hashing/redaction for key/value, bearer, query-string, compact JSON, and spaced JSON/log forms
+- Phase 1 completion plan and implementation record in `docs/superpowers/plans/2026-06-28-phase-1-completion.md`
 
-Remaining in Phase 1:
-
-- richer wrapper event capture inside wrapped sessions
-- more capable multi-event and chain-aware recommendations
-- better session correlation across concurrent/long-lived agent workflows
-- stronger privacy controls for any future raw capture
+Remaining in Phase 1: none.
 
 ### Phase 2: Claude Code
 
@@ -126,6 +130,10 @@ Planned:
 .
 ├── AGENTS.md
 ├── Cargo.toml
+├── docs
+│   └── superpowers
+│       └── plans
+│           └── 2026-06-28-phase-1-completion.md
 ├── project_proposal.md
 ├── skills.toml
 ├── src
@@ -169,6 +177,8 @@ Planned:
 - `src/cli.rs`
   - subcommand routing
   - wrapper execution
+  - wrapper command boundary events
+  - wrapped child environment correlation
   - manual event recording
   - reporting command integration
 
@@ -176,11 +186,13 @@ Planned:
   - `~/.skilltrace` path management
   - config loading/default creation
   - runtime session state
+  - `SKILLTRACE_*` environment variable constants and session fallback helpers
 
 - `src/db.rs`
   - SQLite connection setup
   - schema bootstrap
   - event/session queries
+  - adjacent skill chain query support
   - streaming JSONL export source
 
 - `src/event.rs`
@@ -190,18 +202,20 @@ Planned:
   - stdio JSON-RPC loop
   - MCP request parsing and error framing
   - tool-call handlers backed by local storage
+  - MCP session fallback from `SKILLTRACE_SESSION_ID`
 
 - `src/mcp/tools.rs`
   - MCP tool metadata / schema surface
 
 - `src/privacy.rs`
   - summary-field hashing/redaction helpers driven by privacy config
+  - key/value, bearer, query-string, compact JSON, and spaced JSON/log sanitization
 
 - `src/stats.rs`
   - rendering and filter parsing
 
 - `src/recommend.rs`
-  - current heuristic recommendation logic including overlap/inactivity signals
+  - current heuristic recommendation logic including overlap, inactivity, and adjacent chain signals
 
 - `src/export/jsonl.rs`
   - streaming JSONL export path
@@ -258,15 +272,19 @@ When touching a focused area, run the narrowest useful suite first:
 - `cargo test privacy`
 - `cargo test skills_resolution`
 
+When touching session correlation, also run:
+
+- `SKILLTRACE_SESSION_ID=ambient-session cargo test mcp::server::tests::skill_start_without_session_id_uses_single_active_runtime_session`
+
 ## Known Gaps
 
 These are active backlog items, not accidental omissions:
 
-- recommendation logic is improved but still heuristic rather than chain-aware
-- wrapper tracing only captures session-level behavior, not internal tool boundaries
-- privacy hashing currently covers summary-like fields, not future raw capture paths
+- recommendation logic is improved and chain-aware for adjacent pairs, but still heuristic rather than a full workflow-correlation engine
+- wrapper tracing captures session lifecycle and command boundaries, but not arbitrary internal tool-call boundaries inside wrapped processes
+- privacy hashing covers summary-like fields and common sensitive text forms, but future raw capture paths would need separate stronger controls before being enabled
 - `otel` export is still placeholder-only
-- concurrent multi-process session semantics are improved but not fully modeled as first-class session leases/locks
+- concurrent multi-process session semantics are improved through environment correlation, but not fully modeled as first-class session leases/locks
 
 ## Useful Skills And Tools
 
@@ -313,5 +331,12 @@ Recent milestone commits:
 - `77e45e9` Resolve core issues from repository review
 - `7d43f69` Improve recommendation heuristics
 - `1e4eecd` Hash sensitive event summaries
+- `03b616d` Handle MCP notifications without responses
+- `3a95a36` Ignore repo-local worktrees
+- `1608e97` Add Phase 1 completion plan
+- `8acebdf` Merge chain-aware recommendations
+- `67ce088` Merge wrapper command boundaries
+- `197bc56` Merge stronger privacy sanitization
+- `f4c5ea4` Merge wrapped session correlation
 
 Use these as checkpoints when reasoning about why the current code looks the way it does.
