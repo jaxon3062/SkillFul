@@ -546,7 +546,9 @@ struct RecommendationArgs {
 #[cfg(test)]
 mod tests {
     use std::{
-        env, fs,
+        env,
+        ffi::OsString,
+        fs,
         path::Path,
         sync::{Mutex, OnceLock},
     };
@@ -561,6 +563,34 @@ mod tests {
 
     use super::{McpRequest, handle_request};
 
+    struct EnvVarGuard {
+        key: &'static str,
+        previous_value: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let previous_value = env::var_os(key);
+            unsafe {
+                env::set_var(key, value);
+            }
+            Self { key, previous_value }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous_value {
+                Some(value) => unsafe {
+                    env::set_var(self.key, value);
+                },
+                None => unsafe {
+                    env::remove_var(self.key);
+                },
+            }
+        }
+    }
+
     fn with_temp_home<T>(test: T)
     where
         T: FnOnce(),
@@ -571,20 +601,8 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let home = tempdir().expect("tempdir");
-        let previous_home = env::var_os("HOME");
-        // Safety: test code controls process environment in a scoped single-threaded context.
-        unsafe {
-            env::set_var("HOME", home.path());
-        }
+        let _home_guard = EnvVarGuard::set("HOME", home.path());
         test();
-        match previous_home {
-            Some(value) => unsafe {
-                env::set_var("HOME", value);
-            },
-            None => unsafe {
-                env::remove_var("HOME");
-            },
-        }
     }
 
     #[test]
@@ -820,10 +838,7 @@ mod tests {
             .save(&paths)
             .expect("save state");
 
-            let previous_session = env::var_os("SKILLTRACE_SESSION_ID");
-            unsafe {
-                env::set_var("SKILLTRACE_SESSION_ID", "session-env");
-            }
+            let _session_guard = EnvVarGuard::set("SKILLTRACE_SESSION_ID", "session-env");
 
             let start = handle_request(McpRequest {
                 jsonrpc: "2.0".to_string(),
@@ -838,15 +853,6 @@ mod tests {
             })
             .expect("record_skill_start");
 
-            match previous_session {
-                Some(value) => unsafe {
-                    env::set_var("SKILLTRACE_SESSION_ID", value);
-                },
-                None => unsafe {
-                    env::remove_var("SKILLTRACE_SESSION_ID");
-                },
-            }
-
             let event_id =
                 start.result.expect("result")["event_id"].as_str().expect("event id").to_string();
             let database = Database::open(&paths.database_path())
@@ -860,18 +866,20 @@ mod tests {
 
     #[test]
     fn invalid_tool_returns_jsonrpc_error_response() {
-        let response = handle_request(McpRequest {
-            jsonrpc: "2.0".to_string(),
-            id: json!(7),
-            method: "tools/call".to_string(),
-            params: Some(json!({
-                "name": "skilltrace.not_real",
-                "arguments": {}
-            })),
-        })
-        .expect("response");
+        with_temp_home(|| {
+            let response = handle_request(McpRequest {
+                jsonrpc: "2.0".to_string(),
+                id: json!(7),
+                method: "tools/call".to_string(),
+                params: Some(json!({
+                    "name": "skilltrace.not_real",
+                    "arguments": {}
+                })),
+            })
+            .expect("response");
 
-        assert_eq!(response.error.expect("error").code, -32601);
+            assert_eq!(response.error.expect("error").code, -32601);
+        });
     }
 
     #[test]
