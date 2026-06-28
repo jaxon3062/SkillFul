@@ -20,7 +20,20 @@ fn sanitize_text(value: Option<String>) -> Option<String> {
 }
 
 fn sanitize_inline(value: &str) -> String {
-    value.split_whitespace().map(sanitize_token).collect::<Vec<_>>().join(" ")
+    let mut sanitized = Vec::new();
+    let mut tokens = value.split_whitespace().peekable();
+
+    while let Some(token) = tokens.next() {
+        sanitized.push(sanitize_token(token));
+
+        if token.eq_ignore_ascii_case("Bearer") {
+            if let Some(value) = tokens.next() {
+                sanitized.push(sanitize_bearer_value(value));
+            }
+        }
+    }
+
+    sanitized.join(" ")
 }
 
 fn sanitize_token(token: &str) -> String {
@@ -42,6 +55,15 @@ fn sanitize_token(token: &str) -> String {
     }
 
     token.to_string()
+}
+
+fn sanitize_bearer_value(token: &str) -> String {
+    let trimmed = token.trim_matches(|ch: char| matches!(ch, '"' | '\'' | '(' | ')' | '[' | ']'));
+    if trimmed.starts_with("sha256:") {
+        return token.to_string();
+    }
+
+    token.replacen(trimmed, &hash_value(trimmed), 1)
 }
 
 fn sanitize_key_value(token: &str) -> Option<String> {
