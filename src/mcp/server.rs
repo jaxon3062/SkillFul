@@ -284,12 +284,15 @@ fn handle_tool_call(call: ToolCallParams) -> std::result::Result<Value, ToolCall
                 database.skill_history(args.agent.as_deref()).map_err(ToolCallError::Internal)?;
             let skill_overlap =
                 database.skill_overlap(args.agent.as_deref()).map_err(ToolCallError::Internal)?;
+            let skill_chains =
+                database.skill_chains(args.agent.as_deref()).map_err(ToolCallError::Internal)?;
             let recommendations = recommend::build_recommendations(
                 &skill_stats,
                 &definition_file,
                 &observed,
                 &skill_history,
                 &skill_overlap,
+                &skill_chains,
             )
             .map_err(ToolCallError::Internal)?;
             Ok(json!({ "recommendations": recommendations }))
