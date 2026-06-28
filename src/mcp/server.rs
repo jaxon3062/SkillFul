@@ -29,10 +29,13 @@ pub fn run_stdio() -> Result<()> {
         }
 
         let response = match parse_request(&line) {
-            Ok(request) => match handle_request(request) {
-                Ok(response) => response,
-                Err(error) => McpResponse::error(json!(null), -32603, error.to_string()),
-            },
+            Ok(request) => {
+                let request_id = request.id.clone();
+                match handle_request(request) {
+                    Ok(response) => response,
+                    Err(error) => McpResponse::error(request_id, -32603, error.to_string()),
+                }
+            }
             Err(response) => response,
         };
         serde_json::to_writer(&mut writer, &response)
